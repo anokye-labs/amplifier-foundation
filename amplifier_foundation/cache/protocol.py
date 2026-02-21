@@ -39,3 +39,27 @@ class CacheProviderProtocol(Protocol):
     def clear(self) -> None:
         """Clear all cached bundles."""
         ...
+
+    def is_stale(self, key: str) -> bool:
+        """Check if a cached entry is stale (past its TTL).
+
+        Default implementation returns False (never stale) for backward
+        compatibility with caches that don't support TTL.
+
+        Args:
+            key: Cache key to check.
+
+        Returns:
+            True if the entry exists and is past its TTL, False otherwise.
+        """
+        return False
+
+    def refresh(self, key: str) -> None:
+        """Clear a stale entry so it can be re-populated.
+
+        Default implementation does nothing for backward compatibility
+        with caches that don't support TTL.
+
+        Args:
+            key: Cache key to refresh.
+        """
