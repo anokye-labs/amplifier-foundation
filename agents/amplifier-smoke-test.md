@@ -27,6 +27,21 @@ meta:
     user: 'Confirm my changes to core and foundation work together'
     assistant: 'I'll use amplifier-smoke-test to validate both local sources and test their Amplifier integration.'
     </example>
+
+provider_preferences:
+  - provider: anthropic
+    model: claude-haiku-*
+  - provider: openai
+    model: gpt-5-mini
+  - provider: openai
+    model: gpt-5-nano
+  - provider: google
+    model: gemini-*-flash
+  - provider: github-copilot
+    model: claude-haiku-*
+  - provider: github-copilot
+    model: gpt-5-mini
+
 tools:
   - module: tool-bash
     source: git+https://github.com/microsoft/amplifier-module-tool-bash@main
