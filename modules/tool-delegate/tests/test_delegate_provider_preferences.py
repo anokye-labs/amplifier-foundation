@@ -1,4 +1,4 @@
-"""Tests for agent-level provider_preferences flowing through DelegateTool.execute()."""
+"""Tests for agent-level provider_preferences defaults in tool-delegate."""
 
 from __future__ import annotations
 
@@ -16,43 +16,41 @@ from amplifier_module_tool_delegate import DelegateTool
 
 def _make_delegate_tool(
     *,
-    spawn_fn: AsyncMock | None = None,
+    spawn_fn=None,
     agents: dict | None = None,
-) -> tuple[DelegateTool, AsyncMock]:
-    """Create a DelegateTool wired for execute() testing.
+) -> DelegateTool:
+    """Create a DelegateTool with mocked coordinator for execute() testing.
 
-    Sets up a mocked coordinator with:
-    - coordinator.config containing the agents registry
-    - session.spawn capability (the mock is returned for inspection)
-    - Hooks disabled (returns None)
-
-    Returns:
-        Tuple of (DelegateTool, spawn_fn mock) so tests can inspect spawn calls.
+    Unlike the helper in test_delegate_surface_status.py (which tests internal
+    methods directly), this helper sets up coordinator.config so that the full
+    execute() path works — including the agents registry lookup.
     """
-    _spawn_fn = spawn_fn or AsyncMock(
-        return_value={
-            "output": "done",
-            "session_id": "child-session-001",
-            "status": "success",
-        }
-    )
-
-    _agents = agents or {}
-
     coordinator = MagicMock()
     coordinator.session_id = "parent-session-123"
 
-    # coordinator.config must be a real dict – execute() calls .get("agents", {})
-    coordinator.config = {"agents": _agents}
+    # execute() calls self.coordinator.config.get("agents", {}) at line 733
+    # to look up agent metadata. Must be a real dict, not a MagicMock.
+    coordinator.config = {"agents": agents or {}}
 
     # Capability lookup
     capabilities: dict = {
-        "session.spawn": _spawn_fn,
+        "session.spawn": spawn_fn
+        or AsyncMock(
+            return_value={
+                "output": "done",
+                "session_id": "child-001",
+                "status": "success",
+                "turn_count": 1,
+                "metadata": {},
+            }
+        ),
         "session.resume": AsyncMock(return_value={}),
+        "agents.list": lambda: agents or {},
+        "agents.get": lambda name: (agents or {}).get(name),
         "self_delegation_depth": 0,
     }
 
-    def get_capability(name: str):
+    def get_capability(name):
         return capabilities.get(name)
 
     coordinator.get_capability = get_capability
@@ -65,54 +63,136 @@ def _make_delegate_tool(
     coordinator.session = parent_session
 
     config: dict = {"features": {}, "settings": {"exclude_tools": []}}
-    tool = DelegateTool(coordinator, config)
-    return tool, _spawn_fn
+    return DelegateTool(coordinator, config)
 
 
 # =============================================================================
-# Tests
+# Tests: agent-level provider_preferences
 # =============================================================================
 
 
 class TestAgentProviderPreferences:
-    """Tests for agent-level provider_preferences flowing through execute()."""
+    """Tests for agent-level default provider_preferences in execute()."""
 
     @pytest.mark.asyncio
     async def test_agent_defaults_applied_when_caller_omits_prefs(self):
-        """When an agent has provider_preferences in its metadata and the
-        caller doesn't pass any, the agent's preferences should be used."""
+        """Agent's provider_preferences used when caller doesn't specify any."""
+        spawn_fn = AsyncMock(
+            return_value={
+                "output": "done",
+                "session_id": "child-001",
+                "status": "success",
+                "turn_count": 1,
+                "metadata": {},
+            }
+        )
 
-        tool, spawn_fn = _make_delegate_tool(
+        tool = _make_delegate_tool(
+            spawn_fn=spawn_fn,
             agents={
                 "budget-agent": {
-                    "description": "A budget-friendly agent",
+                    "description": "A budget-tier agent",
                     "provider_preferences": [
                         {"provider": "anthropic", "model": "claude-haiku-*"},
                         {"provider": "openai", "model": "gpt-5-mini"},
                     ],
-                },
+                }
             },
         )
 
-        # Call execute() WITHOUT provider_preferences in input
-        result = await tool.execute(
+        await tool.execute(
             {
                 "agent": "budget-agent",
-                "instruction": "Do something cheaply",
-                # No provider_preferences key
+                "instruction": "Do something simple",
+                "context_depth": "none",
             }
         )
 
-        assert result.success is True
-
-        # Verify spawn_fn was called with the agent's preferences
         spawn_fn.assert_called_once()
-        call_kwargs = spawn_fn.call_args.kwargs
-        prefs = call_kwargs.get("provider_preferences")
-
-        assert prefs is not None, "Expected agent-level prefs to be forwarded"
+        _, kwargs = spawn_fn.call_args
+        prefs = kwargs["provider_preferences"]
+        assert prefs is not None, "Expected agent defaults, got None"
         assert len(prefs) == 2
         assert prefs[0].provider == "anthropic"
         assert prefs[0].model == "claude-haiku-*"
         assert prefs[1].provider == "openai"
         assert prefs[1].model == "gpt-5-mini"
+
+    @pytest.mark.asyncio
+    async def test_caller_prefs_override_agent_defaults(self):
+        """Delegation-time provider_preferences fully replace agent defaults."""
+        spawn_fn = AsyncMock(
+            return_value={
+                "output": "done",
+                "session_id": "child-001",
+                "status": "success",
+                "turn_count": 1,
+                "metadata": {},
+            }
+        )
+
+        tool = _make_delegate_tool(
+            spawn_fn=spawn_fn,
+            agents={
+                "budget-agent": {
+                    "description": "A budget-tier agent",
+                    "provider_preferences": [
+                        {"provider": "anthropic", "model": "claude-haiku-*"},
+                    ],
+                }
+            },
+        )
+
+        await tool.execute(
+            {
+                "agent": "budget-agent",
+                "instruction": "Do something",
+                "context_depth": "none",
+                "provider_preferences": [
+                    {"provider": "openai", "model": "gpt-5.2"},
+                ],
+            }
+        )
+
+        spawn_fn.assert_called_once()
+        _, kwargs = spawn_fn.call_args
+        prefs = kwargs["provider_preferences"]
+        assert len(prefs) == 1, "Caller prefs should fully replace agent defaults"
+        assert prefs[0].provider == "openai"
+        assert prefs[0].model == "gpt-5.2"
+
+    @pytest.mark.asyncio
+    async def test_no_prefs_anywhere_inherits_parent(self):
+        """No agent or caller prefs -> provider_preferences is None (inherit parent)."""
+        spawn_fn = AsyncMock(
+            return_value={
+                "output": "done",
+                "session_id": "child-001",
+                "status": "success",
+                "turn_count": 1,
+                "metadata": {},
+            }
+        )
+
+        tool = _make_delegate_tool(
+            spawn_fn=spawn_fn,
+            agents={
+                "plain-agent": {
+                    "description": "Agent with no provider preferences",
+                }
+            },
+        )
+
+        await tool.execute(
+            {
+                "agent": "plain-agent",
+                "instruction": "Do something",
+                "context_depth": "none",
+            }
+        )
+
+        spawn_fn.assert_called_once()
+        _, kwargs = spawn_fn.call_args
+        assert kwargs["provider_preferences"] is None, (
+            "Without agent or caller prefs, should be None to inherit parent model"
+        )

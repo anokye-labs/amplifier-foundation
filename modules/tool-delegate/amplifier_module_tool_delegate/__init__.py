@@ -768,6 +768,15 @@ Agent usage notes:
                 },
             )
 
+        # Apply agent-level default provider_preferences if caller didn't specify
+        if provider_preferences is None and self.provider_selection_enabled:
+            agent_cfg = agents.get(agent_name, {})
+            agent_default_prefs = agent_cfg.get("provider_preferences", [])
+            if agent_default_prefs:
+                provider_preferences = [
+                    ProviderPreference.from_dict(p) for p in agent_default_prefs
+                ]
+
         # Get parent session ID
         parent_session_id = self.coordinator.session_id
 
