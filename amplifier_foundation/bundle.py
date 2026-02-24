@@ -641,6 +641,8 @@ def _load_agent_file_metadata(path: Path, fallback_name: str) -> dict[str, Any]:
         result["hooks"] = frontmatter["hooks"]
     if "session" in frontmatter:
         result["session"] = frontmatter["session"]
+    if "provider_preferences" in frontmatter:
+        result["provider_preferences"] = frontmatter["provider_preferences"]
 
     # Include instruction from markdown body (same as bundle loading does)
     if body and body.strip():
