@@ -406,6 +406,32 @@ A session directory contains **two critical files** that must be kept in sync:
 6. **Verify integrity** - Check that tool events are balanced (pre/post pairs) in events.jsonl
 7. **Report** - Tell user what was removed and confirm they can resume
 
+### Repair Strategies: REPLACE vs COMPLETE
+
+Before rewinding, consider whether a **COMPLETE repair** is more appropriate:
+
+| Strategy | Action | Best For |
+|----------|--------|----------|
+| **REWIND** | Truncate back to earlier point | User wants to retry from a clean slate |
+| **COMPLETE** | Add synthetic tool_results (keep turn intact) | Preserve context, just fix the incomplete state |
+| **REPLACE** | Remove turn, insert error message | Turn is garbage, minimal value |
+
+**Prefer COMPLETE over REWIND when:**
+- The failed turn has valuable thinking/instructions
+- User wants to resume where they left off, not start over
+- Only the tool_results are missing, not the entire turn
+
+**CRITICAL: Every orphaned tool_call MUST have a synthetic tool_result.** If the actual error cannot be determined, use an unknown error — an unknown error result is infinitely better than no result at all, as the provider will reject transcripts with missing tool_results.
+
+**Always scan full history first:**
+```bash
+comm -23 \
+  <(jq -r '.tool_calls[]?.id' transcript.jsonl | sort -u) \
+  <(jq -r 'select(.role == "tool") | .tool_call_id' transcript.jsonl | sort -u)
+```
+
+See `@foundation:context/agents/session-storage-knowledge.md` for the full COMPLETE workflow, including when to add synthetic assistant responses.
+
 ### Rewind Commands
 
 ```bash
