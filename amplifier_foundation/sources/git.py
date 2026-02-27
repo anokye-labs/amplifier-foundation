@@ -104,16 +104,24 @@ class GitSourceHandler:
         with contextlib.suppress(OSError):
             meta_path.write_text(json.dumps(metadata, indent=2, default=str))
 
-    def _verify_clone_integrity(self, cache_path: Path) -> bool:
+    def _verify_clone_integrity(
+        self, cache_path: Path, subpath: str | None = None
+    ) -> bool:
         """Verify that a cloned repository has expected structure.
 
         Checks for indicators that the clone completed successfully and contains
-        a valid Python module. This catches cases where git clone partially
-        succeeds but leaves an incomplete directory (e.g., due to network issues,
-        cloud sync interference, or disk I/O errors).
+        a valid Python module or bundle. This catches cases where git clone
+        partially succeeds but leaves an incomplete directory (e.g., due to
+        network issues, cloud sync interference, or disk I/O errors).
+
+        When *subpath* is provided (from a ``#subdirectory=`` URI fragment),
+        also checks the subdirectory for expected files.  This supports
+        monorepo-style bundles where ``bundle.md`` or ``pyproject.toml``
+        lives in a subdirectory rather than the repository root.
 
         Args:
             cache_path: Path to the cloned repository.
+            subpath: Optional subdirectory within the clone to check.
 
         Returns:
             True if the clone appears complete and valid, False otherwise.
@@ -126,20 +134,32 @@ class GitSourceHandler:
             logger.warning(f"Clone missing .git directory: {cache_path}")
             return False
 
+        # Paths to check: always the repo root, plus subdirectory when given
+        check_paths = [cache_path]
+        if subpath:
+            sub = cache_path / subpath
+            if sub.exists():
+                check_paths.append(sub)
+
         # For Python modules, check for pyproject.toml, setup.py, or setup.cfg
         # Also check for bundle.md/bundle.yaml for amplifier bundles
-        has_python_module = (
-            (cache_path / "pyproject.toml").exists()
-            or (cache_path / "setup.py").exists()
-            or (cache_path / "setup.cfg").exists()
+        for path in check_paths:
+            has_python_module = (
+                (path / "pyproject.toml").exists()
+                or (path / "setup.py").exists()
+                or (path / "setup.cfg").exists()
+            )
+            has_bundle = (
+                (path / "bundle.md").exists()
+                or (path / "bundle.yaml").exists()
+            )
+            if has_python_module or has_bundle:
+                return True
+
+        logger.warning(
+            f"Clone missing expected files (pyproject.toml/setup.py/bundle.md): {cache_path}"
         )
-        has_bundle = (cache_path / "bundle.md").exists() or (cache_path / "bundle.yaml").exists()
-
-        if not has_python_module and not has_bundle:
-            logger.warning(f"Clone missing expected files (pyproject.toml/setup.py/bundle.md): {cache_path}")
-            return False
-
-        return True
+        return False
 
     async def resolve(self, parsed: ParsedURI, cache_dir: Path) -> ResolvedSource:
         """Resolve git URI to local cached path.
@@ -161,7 +181,7 @@ class GitSourceHandler:
         # Check if already cached and valid
         if cache_path.exists():
             # Verify cache integrity before using
-            if not self._verify_clone_integrity(cache_path):
+            if not self._verify_clone_integrity(cache_path, parsed.subpath):
                 logger.warning(f"Cached clone is invalid, removing: {cache_path}")
                 shutil.rmtree(cache_path, ignore_errors=True)
             else:
@@ -195,7 +215,7 @@ class GitSourceHandler:
             )
 
             # Verify clone completed with expected structure
-            if not self._verify_clone_integrity(cache_path):
+            if not self._verify_clone_integrity(cache_path, parsed.subpath):
                 # Clone succeeded but result is invalid - remove and raise error
                 shutil.rmtree(cache_path, ignore_errors=True)
                 raise BundleNotFoundError(
