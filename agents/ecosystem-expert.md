@@ -41,7 +41,18 @@ meta:
     </example>
 
 provider_preferences:
-  - class: standard
+  - provider: anthropic
+    model: claude-sonnet-*
+  - provider: openai
+    model: gpt-5.[0-9]
+  - provider: google
+    model: gemini-*-pro-preview
+  - provider: google
+    model: gemini-*-pro
+  - provider: github-copilot
+    model: claude-sonnet-*
+  - provider: github-copilot
+    model: gpt-5.[0-9]
 
 tools:
   - module: tool-bash
