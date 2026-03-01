@@ -242,6 +242,20 @@ steps:
           }))
           exit(0)
 
+      # Valid model roles per role taxonomy v2 (2026-03-01)
+      # Update when roles are added/removed from the routing matrix schema
+      VALID_MODEL_ROLES = {
+          "coding", "ui-coding", "vision", "security-audit", "reasoning",
+          "critique", "creative", "writing", "research", "image-gen",
+          "critical-ops", "fast", "general"
+      }
+
+      DEPRECATED_ROLES = {
+          "agentic": "Remove or replace with 'general', 'fast', or 'critical-ops'",
+          "coding-image": "Renamed to 'vision'",
+          "planning": "Renamed to 'reasoning'",
+      }
+
       discovery = json.loads('''{{discovery_results}}''')
       
       def get_bundle_level_tools(repo_path: str) -> dict:
@@ -402,6 +416,73 @@ steps:
               result["has_explicit_tools"] = False
               result["tools_source"] = "implicit"
 
+          # ── model_role validation ──────────────────────────────────
+          # model_role can be top-level or inside meta
+          raw_model_role = frontmatter.get("model_role") or meta.get("model_role")
+          result["has_model_role"] = raw_model_role is not None
+          result["model_role_value"] = raw_model_role
+          result["model_role_issues"] = []
+
+          if raw_model_role is None:
+              result["model_role_issues"].append(
+                  "WARNING: No model_role declared — model routing will use session default. "
+                  "Consider adding model_role for explicit routing."
+              )
+          else:
+              # Normalize to list
+              if isinstance(raw_model_role, str):
+                  model_role_list = [raw_model_role]
+              elif isinstance(raw_model_role, list):
+                  model_role_list = raw_model_role
+              else:
+                  result["model_role_issues"].append(
+                      f"ERROR: model_role must be a string or list, got {type(raw_model_role).__name__}"
+                  )
+                  model_role_list = []
+
+              for role in model_role_list:
+                  if not isinstance(role, str):
+                      result["model_role_issues"].append(
+                          f"ERROR: model_role entries must be strings, got {type(role).__name__}: {role}"
+                      )
+                      continue
+                  if role in DEPRECATED_ROLES:
+                      suggestion = DEPRECATED_ROLES[role]
+                      result["model_role_issues"].append(
+                          f"ERROR: model_role '{role}' is deprecated — {suggestion}"
+                      )
+                  elif role not in VALID_MODEL_ROLES:
+                      valid_list = ", ".join(sorted(VALID_MODEL_ROLES))
+                      result["model_role_issues"].append(
+                          f"ERROR: model_role '{role}' is not a valid role. "
+                          f"Valid roles: {valid_list}"
+                      )
+
+              # Check fallback chain ends with general or fast
+              str_roles = [r for r in model_role_list if isinstance(r, str)]
+              if len(str_roles) > 1 and str_roles[-1] not in ("general", "fast"):
+                  result["model_role_issues"].append(
+                      "WARNING: model_role fallback chain does not end with 'general' or 'fast'. "
+                      "Consider adding 'general' or 'fast' as the last entry for reliable fallback."
+                  )
+
+              # Add model_role warnings/errors to the agent's warnings/errors lists
+              for issue in result["model_role_issues"]:
+                  if issue.startswith("ERROR:"):
+                      result["errors"].append({
+                          "severity": "ERROR",
+                          "code": "INVALID_MODEL_ROLE",
+                          "message": issue[len("ERROR: "):],
+                          "remediation": "Update model_role in frontmatter to use valid role names"
+                      })
+                  elif issue.startswith("WARNING:"):
+                      result["warnings"].append({
+                          "severity": "WARNING",
+                          "code": "MODEL_ROLE_WARNING",
+                          "message": issue[len("WARNING: "):],
+                          "remediation": "Add model_role to frontmatter for explicit model routing"
+                      })
+
           # Extract description for later analysis
           description = meta.get("description", "")
           result["description_length"] = len(description) if description else 0
@@ -530,6 +611,9 @@ steps:
           has_strong_trigger = agent.get("has_strong_trigger", False)
           has_examples = agent.get("has_examples", False)
           description_length = agent.get("description_length", 0)
+          has_model_role = agent.get("has_model_role", False)
+          model_role_issues = agent.get("model_role_issues", [])
+          has_model_role_errors = any(i.startswith("ERROR:") for i in model_role_issues)
           
           # Classify
           if has_errors:
@@ -550,6 +634,9 @@ steps:
           elif not has_examples:
               quality = "polish"
               reason = "Has strong triggers but missing <example> blocks"
+          elif has_model_role_errors:
+              quality = "needs_work"
+              reason = "Invalid or deprecated model_role values"
           elif has_warnings:
               quality = "polish"
               reason = "Meets thresholds but has minor warnings"
@@ -567,6 +654,9 @@ steps:
               "has_examples": has_examples,
               "example_count": agent.get("example_count", 0),
               "description_length": description_length,
+              "has_model_role": has_model_role,
+              "model_role_value": agent.get("model_role_value"),
+              "model_role_issues": model_role_issues,
               "error_count": len(agent.get("errors", [])),
               "warning_count": len(agent.get("warnings", []))
           }
@@ -609,6 +699,26 @@ steps:
               # All agents pass! No LLM analysis needed.
               results["requires_llm_analysis"] = False
           
+          # model_role distribution summary
+          model_role_stats = {
+              "with_model_role": 0,
+              "without_model_role": 0,
+              "role_distribution": {},
+              "agents_without_model_role": []
+          }
+          for agent_cls in results["agents"]:
+              if agent_cls.get("has_model_role"):
+                  model_role_stats["with_model_role"] += 1
+                  raw = agent_cls.get("model_role_value")
+                  roles = raw if isinstance(raw, list) else [raw] if raw else []
+                  for r in roles:
+                      if isinstance(r, str):
+                          model_role_stats["role_distribution"][r] = model_role_stats["role_distribution"].get(r, 0) + 1
+              else:
+                  model_role_stats["without_model_role"] += 1
+                  model_role_stats["agents_without_model_role"].append(agent_cls.get("name"))
+          results["model_role_stats"] = model_role_stats
+
           # Provide summary message
           total = results["summary"]["total"]
           good = results["summary"]["good"]
@@ -1008,9 +1118,27 @@ steps:
 
       ## Quality Classification Summary
 
-      | Agent | Quality | Triggers | Examples | Tools | Description |
-      |-------|---------|----------|----------|-------|-------------|
-      | name  | good/polish/needs_work/critical | ✅/⚠️ | ✅/⚠️ | ✅/⚠️ | length |
+      | Agent | Quality | Triggers | Examples | Tools | Model Role | Description |
+      |-------|---------|----------|----------|-------|------------|-------------|
+      | name  | good/polish/needs_work/critical | ✅/⚠️ | ✅/⚠️ | ✅/⚠️ | ✅/⚠️/❌ | length |
+
+      ## Model Role Coverage
+
+      Use the model_role_stats from quality_classification to produce:
+
+      - **Model Role Coverage**: X/Y agents have model_role declared
+      
+      **Model Role Distribution:**
+      
+      | Role | Count |
+      |------|-------|
+      | role_name | N |
+      
+      **Agents Without model_role:**
+      List agents that do not declare model_role. These will use session defaults for model routing.
+      
+      **Invalid/Deprecated Role Warnings:**
+      List any agents with invalid or deprecated model_role values and the recommended fix.
 
       ## Detailed Findings
 
