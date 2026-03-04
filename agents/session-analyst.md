@@ -424,16 +424,16 @@ When a session won't resume, **repair first** (inject synthetic entries to compl
 **Script-assisted repair (preferred):**
 
 ```bash
-# scripts/session_repair.py is in the amplifier-foundation repo root
+# scripts/session-repair.py is in the amplifier-foundation repo root
 # 1. Diagnose
-python scripts/session_repair.py diagnose /path/to/session/
+python scripts/session-repair.py diagnose /path/to/session/
 
 # 2. Repair (dry-run first, then apply)
-python scripts/session_repair.py repair /path/to/session/ --dry-run
-python scripts/session_repair.py repair /path/to/session/
+python scripts/session-repair.py repair /path/to/session/ --dry-run
+python scripts/session-repair.py repair /path/to/session/
 
 # 3. Verify
-python scripts/session_repair.py diagnose /path/to/session/
+python scripts/session-repair.py diagnose /path/to/session/
 ```
 
 **Manual repair fallback:** If the script is unavailable or you need finer control, follow the manual procedures in @foundation:context/agents/session-repair-knowledge.md which covers the full COMPLETE workflow including when to add synthetic assistant responses and tool results.
@@ -445,7 +445,7 @@ Rewind truncates session history to a point before the issue. **Only use when th
 **Script-assisted rewind:**
 
 ```bash
-python scripts/session_repair.py rewind /path/to/session/ --to-line N
+python scripts/session-repair.py rewind /path/to/session/ --to-line N
 ```
 
 **Manual rewind procedure:**
