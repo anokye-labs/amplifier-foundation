@@ -39,6 +39,7 @@ def parse_transcript(transcript_path: Path) -> list[dict]:
     with open(transcript_path) as f:
         for i, raw_line in enumerate(f, start=1):
             raw_line = raw_line.strip()
+            # Skip blank lines; line_num preserves original file position
             if not raw_line:
                 continue
             entry = json.loads(raw_line)
@@ -70,6 +71,7 @@ def build_tool_index(entries: list[dict]) -> dict:
         # Assistant messages may contain tool_calls
         if entry.get("role") == "assistant" and "tool_calls" in entry:
             for tc in entry["tool_calls"]:
+                # Malformed tool_calls without id are indexed under ""
                 tc_id = tc.get("id", "")
                 tool_name = tc.get("function", {}).get("name", "unknown")
                 tool_uses[tc_id] = {
