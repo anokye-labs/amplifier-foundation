@@ -405,135 +405,84 @@ See @foundation:context/agents/session-storage-knowledge.md for complete safe ex
 
 ---
 
-## Session Repair / Rewind
+## Session Repair (Default) / Rewind (Explicit Only)
 
-You can **repair broken sessions** by rewinding them to a prior state. This is useful when:
-- A session crashed mid-operation leaving orphaned tool calls
-- The user wants to retry from before a problematic exchange
-- Corrupted events are preventing session resumption
+Sessions break in three predictable ways. Your job is to detect which failure mode(s) are present, then repair (default) or rewind (only when the user explicitly asks).
 
-### Understanding Session Files
+### Three Failure Modes
 
-A session directory contains **two critical files** that must be kept in sync:
+| Failure Mode | Description | Detection |
+|-------------|-------------|-----------|
+| **FM1: Missing tool results** | Assistant issued `tool_calls` but matching `tool_result` entries are absent | `comm -23 <(jq -r '.tool_calls[]?.id' transcript.jsonl \| sort -u) <(jq -r 'select(.role=="tool") \| .tool_call_id' transcript.jsonl \| sort -u)` |
+| **FM2: Ordering violations** | Consecutive messages with the same role (e.g., two assistant messages in a row) | `jq -r .role transcript.jsonl \| uniq -d` |
+| **FM3: Incomplete assistant turns** | Assistant message has neither `.content` nor `.tool_calls` | `jq -c 'select(.role=="assistant" and (.content == null or .content == "") and (.tool_calls == null or (.tool_calls \| length == 0)))' transcript.jsonl` |
 
-| File | Purpose | Loaded on Resume? |
-|------|---------|-------------------|
-| `transcript.jsonl` | Conversation messages (user/assistant turns) | **YES** - This is what gets restored |
-| `events.jsonl` | Full audit log (API calls, tool executions, errors) | No - For debugging/logging only |
-| `metadata.json` | Session metadata (bundle, timestamps, turn count) | Yes - Session info |
+### Repair Workflow (Default)
 
-**Critical insight**: When a session resumes, `transcript.jsonl` is loaded to restore conversation context. The `events.jsonl` is the audit log but is NOT used for replay. **Both files must be truncated during a rewind to stay in sync.**
+When a session won't resume, **repair first** (inject synthetic entries to complete broken turns). Only rewind if the user explicitly requests it.
 
-### Rewind Workflow
+**Script-assisted repair (preferred):**
+
+```bash
+# 1. Diagnose
+python scripts/session_repair.py diagnose /path/to/session/
+
+# 2. Repair (dry-run first, then apply)
+python scripts/session_repair.py repair /path/to/session/ --dry-run
+python scripts/session_repair.py repair /path/to/session/
+
+# 3. Verify
+python scripts/session_repair.py diagnose /path/to/session/
+```
+
+**Manual repair fallback:** If the script is unavailable or insufficient, follow the manual procedures in @foundation:context/agents/session-repair-knowledge.md which covers the full COMPLETE workflow including when to add synthetic assistant responses and tool results.
+
+### Rewind Workflow (Only When Explicitly Requested)
+
+Rewind truncates session history to a point before the issue. **Only use when the user explicitly asks to rewind/rollback.**
+
+**Script-assisted rewind:**
+
+```bash
+python scripts/session_repair.py rewind /path/to/session/ --to-line N
+```
+
+**Manual rewind procedure:**
 
 1. **Locate the session** - Find the session directory by ID
-2. **Analyze the breakdown** - Identify where/why it broke (orphaned tools, API errors, etc.)
-3. **Find the target point** - Locate the message to rewind to in BOTH files
-4. **Create backups** - ALWAYS backup before modification (both files)
-5. **Truncate BOTH files** - Remove lines from the target point onward in transcript.jsonl AND events.jsonl
-6. **Verify integrity** - Check that tool events are balanced (pre/post pairs) in events.jsonl
-7. **Report** - Tell user what was removed and confirm they can resume
+2. **Find the target point** - Locate the message to rewind to in BOTH `transcript.jsonl` and `events.jsonl`
+3. **Create backups** - ALWAYS backup before modification: `cp transcript.jsonl transcript.jsonl.bak && cp events.jsonl events.jsonl.bak`
+4. **Truncate transcript.jsonl** - `head -n $((TARGET_LINE - 1)) transcript.jsonl > transcript.jsonl.tmp && mv transcript.jsonl.tmp transcript.jsonl`
+5. **Truncate events.jsonl** - Find corresponding event line, truncate similarly
+6. **Verify integrity** - Check line counts, ensure tool event pre/post pairs are balanced
 
-### Repair Strategies: REPLACE vs COMPLETE
-
-Before rewinding, consider whether a **COMPLETE repair** is more appropriate:
+### Repair Strategies
 
 | Strategy | Action | Best For |
 |----------|--------|----------|
-| **REWIND** | Truncate back to earlier point | User wants to retry from a clean slate |
-| **COMPLETE** | Add synthetic tool_results (keep turn intact) | Preserve context, just fix the incomplete state |
-| **REPLACE** | Remove turn, insert error message | Turn is garbage, minimal value |
+| **REPLACE** | Remove broken turn, insert error summary message | Turn is garbage, minimal value to preserve |
+| **COMPLETE** | Add synthetic `tool_result` entries to fill gaps | Preserve context, just fix the incomplete state |
+| **REWIND** | Truncate back to earlier point | User explicitly wants to retry from a clean slate |
 
-**Prefer COMPLETE over REWIND when:**
-- The failed turn has valuable thinking/instructions
-- User wants to resume where they left off, not start over
-- Only the tool_results are missing, not the entire turn
+**CRITICAL: Every orphaned `tool_call` MUST have a synthetic `tool_result`.** If the actual error cannot be determined, use an unknown error - an unknown error result is infinitely better than no result at all, as the provider will reject transcripts with missing `tool_results`.
 
-**CRITICAL: Every orphaned tool_call MUST have a synthetic tool_result.** If the actual error cannot be determined, use an unknown error — an unknown error result is infinitely better than no result at all, as the provider will reject transcripts with missing tool_results.
-
-**Always scan full history first:**
-```bash
-comm -23 \
-  <(jq -r '.tool_calls[]?.id' transcript.jsonl | sort -u) \
-  <(jq -r 'select(.role == "tool") | .tool_call_id' transcript.jsonl | sort -u)
-```
-
-See `@foundation:context/agents/session-storage-knowledge.md` for the full COMPLETE workflow, including when to add synthetic assistant responses.
-
-### Rewind Commands
-
-```bash
-# === STEP 1: Examine both files ===
-# Count lines in both files
-wc -l transcript.jsonl events.jsonl
-
-# Find user messages in transcript.jsonl (this is what gets loaded on resume)
-grep -n '"role":"user"' transcript.jsonl | tail -5
-
-# Find corresponding events in events.jsonl (for cross-reference)
-grep -n '"user_prompt"\|"role":"user"' events.jsonl | tail -5
-
-# === STEP 2: Backup BOTH files BEFORE any modification ===
-cp transcript.jsonl transcript.jsonl.bak
-cp events.jsonl events.jsonl.bak
-
-# === STEP 3: Truncate transcript.jsonl (THE CRITICAL FILE) ===
-# This is what actually gets loaded on resume!
-# TARGET_LINE = the line number of the user message to remove (and everything after)
-head -n $((TRANSCRIPT_TARGET_LINE - 1)) transcript.jsonl > transcript.jsonl.tmp && mv transcript.jsonl.tmp transcript.jsonl
-
-# === STEP 4: Truncate events.jsonl (for audit log consistency) ===
-# Find the corresponding event line (may differ from transcript line number)
-head -n $((EVENTS_TARGET_LINE - 1)) events.jsonl > events.jsonl.tmp && mv events.jsonl.tmp events.jsonl
-
-# === STEP 5: Verify integrity ===
-echo "Transcript lines remaining: $(wc -l < transcript.jsonl)"
-echo "Events lines remaining: $(wc -l < events.jsonl)"
-echo "Pre-tool events: $(grep -c 'tool:execute:pre' events.jsonl)"
-echo "Post-tool events: $(grep -c 'tool:execute:post' events.jsonl)"
-```
-
-### Correlating Line Numbers Between Files
-
-The line numbers in `transcript.jsonl` and `events.jsonl` are DIFFERENT:
-- `transcript.jsonl` has one line per conversation message (user or assistant)
-- `events.jsonl` has many lines per turn (llm:request, llm:response, tool events, etc.)
-
-**To correlate**: Find the timestamp of the target message in `transcript.jsonl`, then find the corresponding `user_prompt` event in `events.jsonl` with a matching timestamp.
-
-### Safety Rules for Repairs
-
-- **ALWAYS create a backup** before any modification (`.bak` extension)
-- **Verify the target** - Confirm you're removing the right content before truncating
-- **Check balance** - Ensure pre/post event pairs are balanced after repair
-- **Report clearly** - Tell user exactly what was removed (line numbers, content summary)
-- **Preserve the backup** - Don't delete the `.bak` file; user may need it
+See @foundation:context/agents/session-repair-knowledge.md for detailed repair procedures and @foundation:context/agents/session-storage-knowledge.md for session file format and safe extraction patterns.
 
 ### Important: Parent Session Modifications
 
-When you modify a session that is **currently running** (typically the parent session that spawned you), the changes won't take effect immediately. This is because:
+When you modify a session that is **currently running** (typically the parent session that spawned you), the changes won't take effect immediately because running sessions hold their conversation context **in memory**. Changes to files on disk are not automatically reloaded.
 
-- Running sessions hold their conversation context **in memory** (loaded from `transcript.jsonl`)
-- Changes to files on disk are not automatically reloaded
-- The session must be restarted to re-read from disk
+**Always inform the caller when modifying their parent/current session** to close and resume:
 
-**Always inform the caller when modifying their parent/current session:**
-
-> "I've rewound session `{session_id}` by truncating both `transcript.jsonl` (to line {N}) and `events.jsonl` (to line {M}). Since this is your currently active session, you'll need to **close and resume** it to see the changes:
+> "I've repaired session `{session_id}`. Since this is your currently active session, you'll need to **close and resume** it:
 > 1. Exit your current session (Ctrl-D or `/exit`)
 > 2. Resume with: `amplifier session resume {session_id}`"
 
-This applies to:
-- Rewinds (truncating both transcript.jsonl and events.jsonl)
-- Repairs (fixing corrupted events or conversation state)
-- Any modification to session files of a running session
-
-If the session being modified is NOT the parent session (e.g., an old session the user asked about), this caveat doesn't apply - just report the changes normally.
-
 ---
 
-## Deep Knowledge: Large File Handling
+## Deep Knowledge
 
+@foundation:context/agents/session-repair-knowledge.md
 @foundation:context/agents/session-storage-knowledge.md
 
 ---
