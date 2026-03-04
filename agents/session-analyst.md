@@ -118,7 +118,12 @@ To diagnose and repair sessions, you must understand the structure of a valid co
 
   A complete turn means every tool_call has its result and the assistant produced a concluding response.
 
-- **Incomplete assistant turn**: A turn that is missing one or more required parts: missing `tool_result` entries for issued `tool_calls` (orphaned tool calls), missing final assistant text response after tool results, or `tool_result` entries appearing in the wrong position relative to their corresponding `tool_calls`. Any of these conditions makes the turn incomplete and likely to cause provider rejection on resume.
+- **Incomplete assistant turn**: A turn missing one or more required parts:
+  1. Missing `tool_result` entries for issued `tool_calls` (orphaned tool calls)
+  2. Missing final assistant text response after tool results
+  3. `tool_result` entries in the wrong position relative to their `tool_calls`
+
+  Any of these conditions makes the turn incomplete and likely to cause provider rejection on resume.
 
 - **System-injected messages**: Messages that appear with `role: "user"` but are NOT real user messages. These include hook reminders and system context whose content is wrapped in `<system-reminder>` tags. They are injected by the framework, not typed by the human. Do not count these as conversation turns.
 
