@@ -171,17 +171,12 @@ def diagnose(session_dir: Path) -> dict:
             if is_real_user_message(between):
                 misplaced_tool_ids.append(tc_id)
                 break
-            if (
-                between.get("role") == "assistant"
-                and between.get("tool_calls") is None
-                and between_idx != use_idx
-            ):
+            if between.get("role") == "assistant" and between.get("tool_calls") is None:
                 # A non-tool-calling assistant message in between = different turn
                 misplaced_tool_ids.append(tc_id)
                 break
     if misplaced_tool_ids:
-        if "ordering_violation" not in failure_modes:
-            failure_modes.append("ordering_violation")
+        failure_modes.append("ordering_violation")
 
     # --- Failure mode 3: incomplete assistant turns ---
     # Walk through entries looking for assistant messages with tool_calls.
@@ -237,8 +232,7 @@ def diagnose(session_dir: Path) -> dict:
             )
 
     if incomplete_turns:
-        if "incomplete_assistant_turn" not in failure_modes:
-            failure_modes.append("incomplete_assistant_turn")
+        failure_modes.append("incomplete_assistant_turn")
 
     status = "broken" if failure_modes else "healthy"
     recommended = "repair" if failure_modes else "none"
