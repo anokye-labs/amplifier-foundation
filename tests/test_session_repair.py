@@ -314,7 +314,7 @@ class TestDiagnose:
             # Turn 1: normal
             {"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "Hello"},
-            # Turn 2: ordering violation + incomplete turn
+            # Turn 2: ordering violation (tc1 is misplaced, so FM3 skips it)
             {"role": "user", "content": "Do stuff"},
             {
                 "role": "assistant",
@@ -325,8 +325,7 @@ class TestDiagnose:
             },
             {"role": "user", "content": "Hmm?"},  # interrupting real user message
             {"role": "tool", "tool_call_id": "tc1", "name": "bash", "content": "ok"},
-            # No assistant response before next user message
-            # Turn 3: missing tool results
+            # Turn 3: missing tool results (tc2 is orphaned)
             {"role": "user", "content": "More stuff"},
             {
                 "role": "assistant",
@@ -336,6 +335,17 @@ class TestDiagnose:
                 ],
             },
             # No tool result for tc2
+            # Turn 4: clean tool call but incomplete (no assistant response after)
+            {"role": "user", "content": "One more"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc3", "function": {"name": "bash", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc3", "name": "bash", "content": "done"},
+            # No assistant response — end of transcript → incomplete
         ]
         session_dir = _write_transcript(tmp_path / "multi", lines)
         result = sr.diagnose(session_dir)
@@ -344,6 +354,9 @@ class TestDiagnose:
         assert "ordering_violation" in result["failure_modes"]
         assert "incomplete_assistant_turn" in result["failure_modes"]
         assert "missing_tool_results" in result["failure_modes"]
+        # Only tc3's turn should be flagged incomplete; tc1's turn is skipped
+        # because tc1 is misplaced, per spec's FM3 skip rule.
+        assert len(result["incomplete_turns"]) == 1
 
     def test_no_tool_calls_is_healthy(self, sr, tmp_path):
         """A transcript with no tool calls at all is healthy."""

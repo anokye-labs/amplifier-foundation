@@ -196,9 +196,11 @@ def diagnose(session_dir: Path) -> dict:
         if tc_id != first_tc_id:
             continue
 
-        # Skip if any tool_call from this assistant message is orphaned
+        # Skip if any tool_call from this assistant message is orphaned/misplaced
         all_tc_ids = [tc["id"] for tc in assistant_entry.get("tool_calls", [])]
-        if any(tid in orphaned_tool_ids for tid in all_tc_ids):
+        if any(
+            tid in orphaned_tool_ids or tid in misplaced_tool_ids for tid in all_tc_ids
+        ):
             continue
 
         # Find the last tool_result for this assistant message's tool_calls
