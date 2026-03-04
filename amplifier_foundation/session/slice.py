@@ -171,17 +171,20 @@ def add_synthetic_tool_results(
     """Add synthetic error results for orphaned tool calls.
 
     When forking a session mid-turn, some tool calls may not have results.
-    This adds synthetic error results so the conversation remains valid.
+    This adds synthetic error results inserted immediately after the assistant
+    message that made the tool calls, so the conversation remains valid.
 
     Args:
         messages: List of conversation messages.
         orphaned_ids: List of tool_call IDs needing synthetic results.
 
     Returns:
-        New message list with synthetic tool results appended.
+        New message list with synthetic tool results inserted at correct positions.
     """
     if not orphaned_ids:
         return messages
+
+    orphaned_set = set(orphaned_ids)
 
     # Build mapping of tool_call_id -> tool_name from assistant messages
     tool_names: dict[str, str] = {}
@@ -203,24 +206,63 @@ def add_synthetic_tool_results(
                         if tc_id and tc_name:
                             tool_names[tc_id] = tc_name
 
-    result = list(messages)
-    for tool_id in orphaned_ids:
-        tool_name = tool_names.get(tool_id)
-        msg: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tool_id,
-            "content": json.dumps(
-                {
-                    "error": "Tool execution interrupted by session fork",
-                    "forked": True,
-                    "message": "This tool call was in progress when the session was forked. "
-                    "The result is not available in this forked session.",
-                }
-            ),
-        }
-        if tool_name:
-            msg["name"] = tool_name
+    # Walk messages and insert synthetics at correct positions
+    result: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
         result.append(msg)
+
+        # After each assistant message, check if any of its tool_calls are orphaned
+        if msg.get("role") == "assistant":
+            # Collect orphaned tool_call IDs from this assistant message (OpenAI format)
+            msg_orphans: list[str] = []
+            for tc in msg.get("tool_calls", []):
+                tc_id = tc.get("id", "")
+                if tc_id in orphaned_set:
+                    msg_orphans.append(tc_id)
+            # Also check Anthropic format
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tc_id = block.get("id", "")
+                        if tc_id in orphaned_set:
+                            msg_orphans.append(tc_id)
+
+            if msg_orphans:
+                # Insert synthetic results immediately after this assistant message
+                for tc_id in msg_orphans:
+                    tool_name = tool_names.get(tc_id)
+                    synthetic: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": json.dumps(
+                            {
+                                "error": "Tool execution interrupted by session fork",
+                                "forked": True,
+                                "message": "This tool call was in progress when the session was forked. "
+                                "The result is not available in this forked session.",
+                            }
+                        ),
+                    }
+                    if tool_name:
+                        synthetic["name"] = tool_name
+                    result.append(synthetic)
+
+                # FM3 handling: if the next original message is a user message, insert
+                # a synthetic assistant response to close the interrupted turn first
+                next_idx = i + 1
+                if (
+                    next_idx < len(messages)
+                    and messages[next_idx].get("role") == "user"
+                ):
+                    result.append(
+                        {
+                            "role": "assistant",
+                            "content": "The previous tool calls were interrupted by a session fork. "
+                            "Results are not available in this forked session.",
+                        }
+                    )
+
     return result
 
 

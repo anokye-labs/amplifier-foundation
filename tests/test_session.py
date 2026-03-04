@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from amplifier_foundation.session import (
-    ForkResult,
     add_synthetic_tool_results,
     count_events,
     count_turns,
@@ -101,11 +99,23 @@ def sample_session(tmp_path):
 
     messages = [
         {"role": "user", "content": "Turn 1", "timestamp": "2026-01-05T10:00:00Z"},
-        {"role": "assistant", "content": "Response 1", "timestamp": "2026-01-05T10:00:05Z"},
+        {
+            "role": "assistant",
+            "content": "Response 1",
+            "timestamp": "2026-01-05T10:00:05Z",
+        },
         {"role": "user", "content": "Turn 2", "timestamp": "2026-01-05T10:01:00Z"},
-        {"role": "assistant", "content": "Response 2", "timestamp": "2026-01-05T10:01:10Z"},
+        {
+            "role": "assistant",
+            "content": "Response 2",
+            "timestamp": "2026-01-05T10:01:10Z",
+        },
         {"role": "user", "content": "Turn 3", "timestamp": "2026-01-05T10:02:00Z"},
-        {"role": "assistant", "content": "Response 3", "timestamp": "2026-01-05T10:02:15Z"},
+        {
+            "role": "assistant",
+            "content": "Response 3",
+            "timestamp": "2026-01-05T10:02:15Z",
+        },
     ]
 
     # Write transcript
@@ -125,7 +135,11 @@ def sample_session(tmp_path):
 
     # Write events
     events = [
-        {"event": "session:start", "ts": "2026-01-05T10:00:00Z", "session_id": "parent_session_123"},
+        {
+            "event": "session:start",
+            "ts": "2026-01-05T10:00:00Z",
+            "session_id": "parent_session_123",
+        },
         {"event": "prompt:submit", "ts": "2026-01-05T10:00:00Z"},
         {"event": "llm:request", "ts": "2026-01-05T10:00:01Z"},
         {"event": "llm:response", "ts": "2026-01-05T10:00:05Z"},
@@ -258,26 +272,164 @@ class TestAddSyntheticToolResults:
         result = add_synthetic_tool_results(simple_messages, [])
         assert result == simple_messages
 
-    def test_adds_synthetic_result(self):
-        messages = [{"role": "user", "content": "Hi"}]
+    def test_adds_synthetic_result_after_assistant(self):
+        """Synthetic result is inserted immediately after the assistant that made the call."""
+        messages = [
+            {"role": "user", "content": "Do something"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "function": {"name": "do_thing", "arguments": "{}"},
+                    },
+                ],
+            },
+        ]
         result = add_synthetic_tool_results(messages, ["call_123"])
-        assert len(result) == 2
-        assert result[1]["role"] == "tool"
-        assert result[1]["tool_call_id"] == "call_123"
-        assert "forked" in result[1]["content"]
+        assert len(result) == 3
+        assert result[0]["role"] == "user"
+        assert result[1]["role"] == "assistant"
+        assert result[2]["role"] == "tool"
+        assert result[2]["tool_call_id"] == "call_123"
+        assert "forked" in result[2]["content"]
 
-    def test_multiple_orphans(self):
-        messages = [{"role": "user", "content": "Hi"}]
+    def test_tool_name_preserved_in_synthetic(self):
+        """The tool name from the assistant message is included in the synthetic result."""
+        messages = [
+            {"role": "user", "content": "List files"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "function": {"name": "list_files", "arguments": "{}"},
+                    },
+                ],
+            },
+        ]
+        result = add_synthetic_tool_results(messages, ["call_123"])
+        synthetic = next(m for m in result if m.get("role") == "tool")
+        assert synthetic.get("name") == "list_files"
+
+    def test_multiple_orphans_after_assistant(self):
+        """All synthetic results for one assistant message are inserted after it."""
+        messages = [
+            {"role": "user", "content": "Do stuff"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "fn_a", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "fn_b", "arguments": "{}"}},
+                    {"id": "c", "function": {"name": "fn_c", "arguments": "{}"}},
+                ],
+            },
+        ]
         result = add_synthetic_tool_results(messages, ["a", "b", "c"])
-        assert len(result) == 4
+        # user + assistant + 3 tool synthetics = 5
+        assert len(result) == 5
         tool_ids = {m["tool_call_id"] for m in result if m.get("role") == "tool"}
         assert tool_ids == {"a", "b", "c"}
+        # All synthetics appear after the assistant (index 1)
+        roles = [m["role"] for m in result]
+        assert roles == ["user", "assistant", "tool", "tool", "tool"]
+
+    def test_synthetics_inserted_before_subsequent_user_message(self):
+        """Synthetic results go BETWEEN an assistant message and the next user message.
+
+        This is the core regression test: when messages end with
+        [assistant+tool_calls, user_message], synthetics must go BETWEEN them,
+        not after the user message.
+        """
+        messages = [
+            {"role": "user", "content": "Do something"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_orphan",
+                        "function": {"name": "do_thing", "arguments": "{}"},
+                    },
+                ],
+            },
+            {"role": "user", "content": "Next question"},
+        ]
+        result = add_synthetic_tool_results(messages, ["call_orphan"])
+
+        roles = [m["role"] for m in result]
+
+        # Synthetic tool result must appear BEFORE the next user message
+        tool_idx = roles.index("tool")
+        last_user_idx = max(i for i, r in enumerate(roles) if r == "user")
+        assert tool_idx < last_user_idx, (
+            "synthetic tool result must precede subsequent user message"
+        )
+
+        # FM3: a synthetic assistant response closes the interrupted turn
+        # Structure: user, assistant(tool_calls), tool(synthetic), assistant(synthetic), user
+        assert roles[0] == "user"
+        assert roles[1] == "assistant"  # original with tool_calls
+        assert roles[2] == "tool"  # synthetic tool result
+        assert roles[3] == "assistant"  # FM3 synthetic assistant response
+        assert roles[4] == "user"  # original next user message
+
+    def test_fm3_synthetic_assistant_only_when_user_follows(self):
+        """FM3 synthetic assistant response is NOT inserted when no user message follows."""
+        messages = [
+            {"role": "user", "content": "Do something"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_orphan",
+                        "function": {"name": "do_thing", "arguments": "{}"},
+                    },
+                ],
+            },
+            # No user message after — this is a slice at the end of the conversation
+        ]
+        result = add_synthetic_tool_results(messages, ["call_orphan"])
+
+        # Only user, assistant, tool synthetic — no extra FM3 assistant
+        roles = [m["role"] for m in result]
+        assert roles == ["user", "assistant", "tool"]
+
+    def test_anthropic_format_tool_use(self):
+        """Synthetic results are inserted correctly for Anthropic content-block format."""
+        messages = [
+            {"role": "user", "content": "Do something"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me help."},
+                    {
+                        "type": "tool_use",
+                        "id": "tool_abc",
+                        "name": "search",
+                        "input": {},
+                    },
+                ],
+            },
+        ]
+        result = add_synthetic_tool_results(messages, ["tool_abc"])
+        assert len(result) == 3
+        assert result[2]["role"] == "tool"
+        assert result[2]["tool_call_id"] == "tool_abc"
+        assert result[2].get("name") == "search"
+        assert "forked" in result[2]["content"]
 
 
 class TestSliceToTurnWithOrphanedTools:
     def test_complete_orphaned_tools(self, messages_with_orphaned_tool):
         # Fork at turn 2 which has orphaned tool
-        sliced = slice_to_turn(messages_with_orphaned_tool, 2, handle_orphaned_tools="complete")
+        sliced = slice_to_turn(
+            messages_with_orphaned_tool, 2, handle_orphaned_tools="complete"
+        )
         # Should have added synthetic result
         tool_results = [m for m in sliced if m.get("role") == "tool"]
         assert any("forked" in m.get("content", "") for m in tool_results)
