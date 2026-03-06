@@ -694,8 +694,23 @@ Agent usage notes:
         instruction = input.get("instruction", "").strip()
         session_id = input.get("session_id", "").strip()
 
-        # Framework context — available if orchestrator provides it.
-        # Read opportunistically; not declared in input_schema (not required).
+        # Framework context — read opportunistically from tool input.
+        # KNOWN LIMITATION: tool_call_id will always be "" here.
+        #
+        # The LLM never includes tool_call_id in its tool-call arguments — it is
+        # a framework concept (the id assigned by the provider to the tool_use
+        # block). We explicitly decided NOT to inject it via _metadata in the
+        # tool arguments dict, so this read always produces an empty string.
+        #
+        # The field is structurally present in delegate:agent_spawned events for
+        # forward-compatibility, but will be empty until the orchestrator gains a
+        # mechanism to pass per-dispatch context to tools.  The cleanest path is
+        # a coordinator._current_tool_context dict that the orchestrator sets to
+        # {"tool_call_id": tool_call.id, "parallel_group_id": group_id} before
+        # calling tool.execute() and clears afterward; this delegate tool would
+        # then read from self.coordinator._current_tool_context instead of input.
+        # That change requires touching loop-streaming and loop-basic (separate
+        # repos) and is tracked as a follow-up task.
         tool_call_id = input.get("tool_call_id", "")
         parallel_group_id = input.get("parallel_group_id", None)
 
