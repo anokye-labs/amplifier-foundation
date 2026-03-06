@@ -694,6 +694,11 @@ Agent usage notes:
         instruction = input.get("instruction", "").strip()
         session_id = input.get("session_id", "").strip()
 
+        # Framework context — available if orchestrator provides it.
+        # Read opportunistically; not declared in input_schema (not required).
+        tool_call_id = input.get("tool_call_id", "")
+        parallel_group_id = input.get("parallel_group_id", None)
+
         # Context parameters (two-parameter system)
         context_depth = input.get("context_depth", "recent")
         context_turns = input.get("context_turns", 5)
@@ -715,10 +720,14 @@ Agent usage notes:
         # provider_preferences wins when both are provided (explicit pin overrides matrix)
         raw_model_role = input.get("model_role", "").strip()
         if raw_model_role and provider_preferences is None:
-            routing_state = getattr(self.coordinator, "session_state", {}).get("routing_matrix")
+            routing_state = getattr(self.coordinator, "session_state", {}).get(
+                "routing_matrix"
+            )
             if routing_state:
                 try:
-                    from amplifier_module_hooks_routing.resolver import resolve_model_role
+                    from amplifier_module_hooks_routing.resolver import (
+                        resolve_model_role,
+                    )
 
                     roles = [raw_model_role]
                     matrix = routing_state.get("roles", {})
@@ -726,9 +735,7 @@ Agent usage notes:
                     resolved = await resolve_model_role(roles, matrix, providers)
                     if resolved:
                         provider_preferences = [
-                            ProviderPreference(
-                                provider=r["provider"], model=r["model"]
-                            )
+                            ProviderPreference(provider=r["provider"], model=r["model"])
                             for r in resolved
                         ]
                 except ImportError:
@@ -758,7 +765,13 @@ Agent usage notes:
                     success=False,
                     error={"message": "Session resumption is disabled"},
                 )
-            return await self._resume_existing_session(session_id, instruction, hooks)
+            return await self._resume_existing_session(
+                session_id,
+                instruction,
+                hooks,
+                tool_call_id=tool_call_id,
+                parallel_group_id=parallel_group_id,
+            )
 
         # SPAWN MODE: Create new agent session (requires agent)
         if not agent_name:
@@ -850,6 +863,8 @@ Agent usage notes:
                         "parent_session_id": parent_session_id,
                         "context_depth": context_depth,
                         "context_scope": context_scope,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
 
@@ -920,6 +935,15 @@ Agent usage notes:
             # See session_spawner.py in amplifier-app-cli for the reference
             # app-layer implementation that handles all kwargs.
             # See examples/07_full_workflow.py for a minimal reference.
+            # Build session metadata for child session.
+            # agent_name is always included; tool_call_id and parallel_group_id
+            # are only included when present so callers can test for key presence.
+            session_metadata: dict[str, Any] = {"agent_name": agent_name}
+            if tool_call_id:
+                session_metadata["tool_call_id"] = tool_call_id
+            if parallel_group_id:
+                session_metadata["parallel_group_id"] = parallel_group_id
+
             spawn_coro = spawn_fn(
                 agent_name=agent_name,
                 instruction=effective_instruction,
@@ -931,6 +955,7 @@ Agent usage notes:
                 orchestrator_config=orchestrator_config,
                 provider_preferences=provider_preferences,
                 self_delegation_depth=child_self_delegation_depth,
+                session_metadata=session_metadata,
             )
             if self.timeout is not None:
                 async with asyncio.timeout(self.timeout):
@@ -947,6 +972,8 @@ Agent usage notes:
                         "sub_session_id": sub_session_id,
                         "parent_session_id": parent_session_id,
                         "success": True,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
 
@@ -984,6 +1011,8 @@ Agent usage notes:
                         "sub_session_id": sub_session_id,
                         "parent_session_id": parent_session_id,
                         "error": timeout_msg,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
             return ToolResult(success=False, error={"message": timeout_msg})
@@ -1002,13 +1031,21 @@ Agent usage notes:
                         "sub_session_id": sub_session_id,
                         "parent_session_id": parent_session_id,
                         "error": error_msg,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
 
             return ToolResult(success=False, error={"message": error_msg})
 
     async def _resume_existing_session(
-        self, session_id: str, instruction: str, hooks
+        self,
+        session_id: str,
+        instruction: str,
+        hooks,
+        *,
+        tool_call_id: str = "",
+        parallel_group_id: str | None = None,
     ) -> ToolResult:
         """Resume existing agent session.
 
@@ -1016,6 +1053,8 @@ Agent usage notes:
             session_id: Full agent session ID to resume (from previous delegate call)
             instruction: Follow-up instruction
             hooks: Hook coordinator for event emission
+            tool_call_id: Orchestrator tool call ID (enriches event payloads)
+            parallel_group_id: Parallel group ID (enriches event payloads)
 
         Returns:
             ToolResult with success status and output or error
@@ -1033,6 +1072,8 @@ Agent usage notes:
                     {
                         "session_id": full_session_id,
                         "parent_session_id": parent_session_id,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
 
@@ -1065,6 +1106,8 @@ Agent usage notes:
                         "sub_session_id": full_session_id,
                         "parent_session_id": parent_session_id,
                         "success": True,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
 
@@ -1096,6 +1139,8 @@ Agent usage notes:
                         "session_id": session_id,
                         "parent_session_id": parent_session_id,
                         "error": str(e),
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
             return ToolResult(success=False, error={"message": str(e)})
@@ -1109,6 +1154,8 @@ Agent usage notes:
                         "session_id": session_id,
                         "parent_session_id": parent_session_id,
                         "error": f"Session not found: {str(e)}",
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
             return ToolResult(
@@ -1137,6 +1184,8 @@ Agent usage notes:
                         "session_id": session_id,
                         "parent_session_id": parent_session_id,
                         "error": timeout_msg,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
             return ToolResult(success=False, error={"message": timeout_msg})
@@ -1153,6 +1202,8 @@ Agent usage notes:
                         "session_id": session_id,
                         "parent_session_id": parent_session_id,
                         "error": error_msg,
+                        "tool_call_id": tool_call_id,
+                        "parallel_group_id": parallel_group_id,
                     },
                 )
             return ToolResult(success=False, error={"message": error_msg})
