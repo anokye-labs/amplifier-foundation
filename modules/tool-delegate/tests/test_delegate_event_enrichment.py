@@ -1,4 +1,9 @@
-"""Tests for CP-4: delegate tool event enrichment with tool_call_id/parallel_group_id."""
+"""Tests for CP-4: delegate tool event enrichment with tool_call_id/parallel_group_id.
+
+The delegate tool reads tool_call_id and parallel_group_id from the
+coordinator's _tool_dispatch_context attribute, which the orchestrator sets
+immediately before calling tool.execute() and clears in a finally block.
+"""
 
 from __future__ import annotations
 
@@ -20,16 +25,27 @@ def _make_delegate_tool(
     resume_fn=None,
     agents: dict | None = None,
     hooks=None,
+    dispatch_context: dict | None = None,
 ) -> DelegateTool:
     """Create a DelegateTool wired for execute()-level tests.
 
     Sets up coordinator.config so the full execute() path works,
     and wires up hooks to capture event emissions.
+
+    Args:
+        dispatch_context: If provided, sets coordinator._tool_dispatch_context
+            to this value before the tool is called.  Pass {} or omit to test
+            the "no dispatch context" path (empty defaults).
     """
     coordinator = MagicMock()
     coordinator.session_id = "parent-session-123"
     coordinator.config = {"agents": agents or {}}
     coordinator.session_state = {}
+
+    # Explicitly set _tool_dispatch_context to avoid MagicMock auto-attributes.
+    # Tests that want to simulate orchestrator-provided context pass dispatch_context.
+    # Tests that want empty-defaults pass dispatch_context={} or omit it.
+    coordinator._tool_dispatch_context = dispatch_context if dispatch_context is not None else {}
 
     default_spawn_result = {
         "output": "done",
@@ -91,11 +107,12 @@ class TestSpawnEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_spawned_event_contains_tool_call_id(self):
-        """delegate:agent_spawned payload includes tool_call_id from input."""
+        """delegate:agent_spawned payload includes tool_call_id from coordinator dispatch context."""
         hooks = _make_hooks()
         tool = _make_delegate_tool(
             hooks=hooks,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"tool_call_id": "call_abc123"},
         )
 
         await tool.execute(
@@ -103,7 +120,6 @@ class TestSpawnEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "tool_call_id": "call_abc123",
             }
         )
 
@@ -117,11 +133,12 @@ class TestSpawnEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_spawned_event_contains_parallel_group_id(self):
-        """delegate:agent_spawned payload includes parallel_group_id from input."""
+        """delegate:agent_spawned payload includes parallel_group_id from coordinator dispatch context."""
         hooks = _make_hooks()
         tool = _make_delegate_tool(
             hooks=hooks,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"parallel_group_id": "group_xyz"},
         )
 
         await tool.execute(
@@ -129,7 +146,6 @@ class TestSpawnEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "parallel_group_id": "group_xyz",
             }
         )
 
@@ -140,11 +156,12 @@ class TestSpawnEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_completed_event_contains_tool_call_id(self):
-        """delegate:agent_completed payload includes tool_call_id from input."""
+        """delegate:agent_completed payload includes tool_call_id from coordinator dispatch context."""
         hooks = _make_hooks()
         tool = _make_delegate_tool(
             hooks=hooks,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"tool_call_id": "call_def456"},
         )
 
         await tool.execute(
@@ -152,7 +169,6 @@ class TestSpawnEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "tool_call_id": "call_def456",
             }
         )
 
@@ -163,11 +179,12 @@ class TestSpawnEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_completed_event_contains_parallel_group_id(self):
-        """delegate:agent_completed payload includes parallel_group_id from input."""
+        """delegate:agent_completed payload includes parallel_group_id from coordinator dispatch context."""
         hooks = _make_hooks()
         tool = _make_delegate_tool(
             hooks=hooks,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"parallel_group_id": "group_parallel"},
         )
 
         await tool.execute(
@@ -175,7 +192,6 @@ class TestSpawnEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "parallel_group_id": "group_parallel",
             }
         )
 
@@ -185,15 +201,16 @@ class TestSpawnEventEnrichment:
         assert payload["parallel_group_id"] == "group_parallel"
 
     @pytest.mark.asyncio
-    async def test_events_have_empty_defaults_when_fields_absent(self):
-        """Events include tool_call_id and parallel_group_id with empty defaults."""
+    async def test_events_have_empty_defaults_when_dispatch_context_absent(self):
+        """Events include tool_call_id and parallel_group_id with empty defaults
+        when no _tool_dispatch_context is set (e.g. older orchestrator)."""
         hooks = _make_hooks()
         tool = _make_delegate_tool(
             hooks=hooks,
             agents={"test-agent": {"description": "A test agent"}},
+            # dispatch_context omitted → defaults to {} → empty string / None
         )
 
-        # Execute without tool_call_id or parallel_group_id
         await tool.execute(
             {
                 "agent": "test-agent",
@@ -230,6 +247,7 @@ class TestSpawnErrorEventEnrichment:
             hooks=hooks,
             spawn_fn=spawn_fn,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"tool_call_id": "call_err001"},
         )
 
         await tool.execute(
@@ -237,7 +255,6 @@ class TestSpawnErrorEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "tool_call_id": "call_err001",
             }
         )
 
@@ -255,6 +272,7 @@ class TestSpawnErrorEventEnrichment:
             hooks=hooks,
             spawn_fn=spawn_fn,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"parallel_group_id": "group_err"},
         )
 
         await tool.execute(
@@ -262,7 +280,6 @@ class TestSpawnErrorEventEnrichment:
                 "agent": "test-agent",
                 "instruction": "Do something",
                 "context_depth": "none",
-                "parallel_group_id": "group_err",
             }
         )
 
@@ -295,6 +312,7 @@ class TestSessionMetadataInSpawn:
         tool = _make_delegate_tool(
             spawn_fn=spawn_fn,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"tool_call_id": "call_spawn_meta"},
         )
 
         await tool.execute(
@@ -302,7 +320,6 @@ class TestSessionMetadataInSpawn:
                 "agent": "test-agent",
                 "instruction": "Do work",
                 "context_depth": "none",
-                "tool_call_id": "call_spawn_meta",
             }
         )
 
@@ -360,6 +377,7 @@ class TestSessionMetadataInSpawn:
         tool = _make_delegate_tool(
             spawn_fn=spawn_fn,
             agents={"test-agent": {"description": "A test agent"}},
+            dispatch_context={"parallel_group_id": "group_meta"},
         )
 
         await tool.execute(
@@ -367,7 +385,6 @@ class TestSessionMetadataInSpawn:
                 "agent": "test-agent",
                 "instruction": "Do work",
                 "context_depth": "none",
-                "parallel_group_id": "group_meta",
             }
         )
 
@@ -392,9 +409,9 @@ class TestSessionMetadataInSpawn:
         tool = _make_delegate_tool(
             spawn_fn=spawn_fn,
             agents={"test-agent": {"description": "A test agent"}},
+            # No dispatch_context → tool_call_id="" and parallel_group_id=None
         )
 
-        # No tool_call_id or parallel_group_id in input
         await tool.execute(
             {
                 "agent": "test-agent",
@@ -423,7 +440,7 @@ class TestResumeEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_resumed_event_contains_tool_call_id(self):
-        """delegate:agent_resumed payload includes tool_call_id from input."""
+        """delegate:agent_resumed payload includes tool_call_id from coordinator dispatch context."""
         hooks = _make_hooks()
         resume_fn = AsyncMock(
             return_value={
@@ -437,13 +454,13 @@ class TestResumeEventEnrichment:
         tool = _make_delegate_tool(
             hooks=hooks,
             resume_fn=resume_fn,
+            dispatch_context={"tool_call_id": "call_resume_001"},
         )
 
         await tool.execute(
             {
                 "session_id": "child-001",
                 "instruction": "Continue",
-                "tool_call_id": "call_resume_001",
             }
         )
 
@@ -454,7 +471,7 @@ class TestResumeEventEnrichment:
 
     @pytest.mark.asyncio
     async def test_resumed_event_contains_parallel_group_id(self):
-        """delegate:agent_resumed payload includes parallel_group_id from input."""
+        """delegate:agent_resumed payload includes parallel_group_id from coordinator dispatch context."""
         hooks = _make_hooks()
         resume_fn = AsyncMock(
             return_value={
@@ -468,13 +485,13 @@ class TestResumeEventEnrichment:
         tool = _make_delegate_tool(
             hooks=hooks,
             resume_fn=resume_fn,
+            dispatch_context={"parallel_group_id": "group_resume"},
         )
 
         await tool.execute(
             {
                 "session_id": "child-001",
                 "instruction": "Continue",
-                "parallel_group_id": "group_resume",
             }
         )
 
@@ -499,13 +516,13 @@ class TestResumeEventEnrichment:
         tool = _make_delegate_tool(
             hooks=hooks,
             resume_fn=resume_fn,
+            dispatch_context={"tool_call_id": "call_resume_complete"},
         )
 
         await tool.execute(
             {
                 "session_id": "child-001",
                 "instruction": "Continue",
-                "tool_call_id": "call_resume_complete",
             }
         )
 
@@ -515,8 +532,9 @@ class TestResumeEventEnrichment:
         assert payload["tool_call_id"] == "call_resume_complete"
 
     @pytest.mark.asyncio
-    async def test_resume_events_defaults_when_fields_absent(self):
-        """Resume events include tool_call_id/'parallel_group_id with empty defaults."""
+    async def test_resume_events_defaults_when_dispatch_context_absent(self):
+        """Resume events include tool_call_id/parallel_group_id with empty defaults
+        when no _tool_dispatch_context is set."""
         hooks = _make_hooks()
         resume_fn = AsyncMock(
             return_value={
@@ -530,9 +548,9 @@ class TestResumeEventEnrichment:
         tool = _make_delegate_tool(
             hooks=hooks,
             resume_fn=resume_fn,
+            # dispatch_context omitted → empty defaults
         )
 
-        # No tool_call_id or parallel_group_id in input
         await tool.execute(
             {
                 "session_id": "child-001",

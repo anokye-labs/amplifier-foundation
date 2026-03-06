@@ -694,25 +694,16 @@ Agent usage notes:
         instruction = input.get("instruction", "").strip()
         session_id = input.get("session_id", "").strip()
 
-        # Framework context — read opportunistically from tool input.
-        # KNOWN LIMITATION: tool_call_id will always be "" here.
+        # Framework context — read from coordinator dispatch context.
         #
-        # The LLM never includes tool_call_id in its tool-call arguments — it is
-        # a framework concept (the id assigned by the provider to the tool_use
-        # block). We explicitly decided NOT to inject it via _metadata in the
-        # tool arguments dict, so this read always produces an empty string.
-        #
-        # The field is structurally present in delegate:agent_spawned events for
-        # forward-compatibility, but will be empty until the orchestrator gains a
-        # mechanism to pass per-dispatch context to tools.  The cleanest path is
-        # a coordinator._current_tool_context dict that the orchestrator sets to
-        # {"tool_call_id": tool_call.id, "parallel_group_id": group_id} before
-        # calling tool.execute() and clears afterward; this delegate tool would
-        # then read from self.coordinator._current_tool_context instead of input.
-        # That change requires touching loop-streaming and loop-basic (separate
-        # repos) and is tracked as a follow-up task.
-        tool_call_id = input.get("tool_call_id", "")
-        parallel_group_id = input.get("parallel_group_id", None)
+        # The orchestrator sets coordinator._tool_dispatch_context =
+        # {"tool_call_id": tool_call.id, "parallel_group_id": group_id}
+        # immediately before calling tool.execute(), and clears it in a
+        # finally block afterward.  We use getattr with a fallback so this
+        # works gracefully with coordinators that predate the mechanism.
+        dispatch_ctx = getattr(self.coordinator, "_tool_dispatch_context", {})
+        tool_call_id = dispatch_ctx.get("tool_call_id", "")
+        parallel_group_id = dispatch_ctx.get("parallel_group_id", None)
 
         # Context parameters (two-parameter system)
         context_depth = input.get("context_depth", "recent")
