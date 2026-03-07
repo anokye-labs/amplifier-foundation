@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from amplifier_foundation.spawn_utils import ProviderPreference
+from amplifier_foundation.spawn_utils import _apply_single_override
 from amplifier_foundation.spawn_utils import _build_provider_lookup
 from amplifier_foundation.spawn_utils import _find_provider_index
 from amplifier_foundation.spawn_utils import apply_provider_preferences
@@ -442,3 +443,89 @@ class TestFindProviderIndexMultiInstance:
         ]
         assert _find_provider_index(providers, "anthropic-team-a") == 0
         assert _find_provider_index(providers, "anthropic-team-b") == 1
+
+
+class TestApplySingleOverrideConfig:
+    """Tests for _apply_single_override pref_config merging and protected keys."""
+
+    def _make_mount_plan(self, provider_config: dict) -> tuple[dict, list]:
+        """Build a minimal mount plan with one provider."""
+        mount_plan = {
+            "providers": [{"module": "provider-openai", "config": provider_config}],
+            "session": {"orchestrator": {"module": "loop-basic"}},
+        }
+        return mount_plan, mount_plan["providers"]
+
+    def test_apply_single_override_merges_pref_config(self) -> None:
+        """pref_config keys are merged into provider config."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "default_model": "gpt-4", "priority": 10}
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={"reasoning_effort": "high", "temperature": 0.3},
+        )
+        result_config = result["providers"][0]["config"]
+        assert result_config["reasoning_effort"] == "high"
+        assert result_config["temperature"] == 0.3
+
+    def test_apply_single_override_protects_credentials(self) -> None:
+        """api_key is protected — pref_config cannot override it."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "default_model": "gpt-4", "priority": 10}
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={"api_key": "EVIL", "reasoning_effort": "high"},
+        )
+        result_config = result["providers"][0]["config"]
+        assert result_config["api_key"] == "sk-test"
+        assert result_config["reasoning_effort"] == "high"
+
+    def test_apply_single_override_protects_base_url(self) -> None:
+        """base_url is protected — pref_config cannot override it."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "base_url": "http://real.com", "priority": 10}
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={"base_url": "http://evil.com", "temperature": 0.5},
+        )
+        result_config = result["providers"][0]["config"]
+        assert result_config["base_url"] == "http://real.com"
+        assert result_config["temperature"] == 0.5
+
+    def test_apply_single_override_no_config_backward_compat(self) -> None:
+        """Calling without pref_config works exactly as before."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "default_model": "gpt-4", "priority": 10}
+        )
+        result = _apply_single_override(mount_plan, providers, 0, "gpt-5")
+        result_config = result["providers"][0]["config"]
+        assert result_config["priority"] == 0
+        assert result_config["default_model"] == "gpt-5"
+        assert result_config["api_key"] == "sk-test"
+
+    def test_apply_single_override_preference_wins_over_base(self) -> None:
+        """pref_config value wins over same key already in provider config."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "reasoning_effort": "low", "priority": 10}
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={"reasoning_effort": "high"},
+        )
+        result_config = result["providers"][0]["config"]
+        assert result_config["reasoning_effort"] == "high"

@@ -17,6 +17,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PROTECTED_CONFIG_KEYS = frozenset(
+    {
+        "api_key",
+        "base_url",
+        "host",
+        "azure_endpoint",
+        "api_version",
+        "deployment_name",
+        "secret",
+    }
+)
+
 
 @dataclass
 class ProviderPreference:
@@ -371,6 +383,7 @@ def _apply_single_override(
     providers: list[dict[str, Any]],
     target_idx: int,
     model: str,
+    pref_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply a single provider/model override to the mount plan.
 
@@ -379,6 +392,10 @@ def _apply_single_override(
         providers: Original providers list.
         target_idx: Index of provider to promote.
         model: Model to set for the provider.
+        pref_config: Optional routing/preference config to merge into the
+            provider config. Preference wins over base config for non-protected
+            keys. Keys in PROTECTED_CONFIG_KEYS (credentials, infrastructure)
+            are never overridden.
 
     Returns:
         New mount plan with override applied.
@@ -395,6 +412,11 @@ def _apply_single_override(
             # Promote to priority 0 (highest)
             p_copy["config"]["priority"] = 0
             p_copy["config"]["default_model"] = model
+            # Merge routing/preference config — preference wins over base
+            if pref_config:
+                for key, value in pref_config.items():
+                    if key not in PROTECTED_CONFIG_KEYS:
+                        p_copy["config"][key] = value
             logger.info(
                 "Provider preference applied: %s (priority=0, model=%s)",
                 p_copy.get("module"),
