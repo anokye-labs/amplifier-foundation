@@ -29,12 +29,83 @@ class TestDeepMerge:
         result = deep_merge(parent, child)
         assert result == {"config": {"a": 1, "b": 3, "c": 4}}
 
-    def test_child_list_replaces_parent_list(self) -> None:
-        """Child lists replace parent lists entirely."""
+    def test_child_list_concatenates_with_parent_list(self) -> None:
+        """Child lists are concatenated with parent lists (not replaced)."""
         parent = {"items": [1, 2, 3]}
         child = {"items": [4, 5]}
         result = deep_merge(parent, child)
-        assert result == {"items": [4, 5]}
+        assert result == {"items": [1, 2, 3, 4, 5]}
+
+    def test_list_concatenation_deduplicates(self) -> None:
+        """Duplicate entries are removed during list concatenation."""
+        parent = {"items": [1, 2, 3]}
+        child = {"items": [2, 3, 4]}
+        result = deep_merge(parent, child)
+        assert result == {"items": [1, 2, 3, 4]}
+
+    def test_list_concatenation_with_strings(self) -> None:
+        """String lists are concatenated and deduplicated."""
+        parent = {"skills": ["a", "b"]}
+        child = {"skills": ["b", "c"]}
+        result = deep_merge(parent, child)
+        assert result == {"skills": ["a", "b", "c"]}
+
+    def test_list_concatenation_with_dicts(self) -> None:
+        """Lists of dicts are concatenated (no deduplication needed for distinct dicts)."""
+        parent = {"modules": [{"x": 1}]}
+        child = {"modules": [{"y": 2}]}
+        result = deep_merge(parent, child)
+        assert result == {"modules": [{"x": 1}, {"y": 2}]}
+
+    def test_list_concatenation_preserves_order(self) -> None:
+        """Parent items come first, child items are appended after."""
+        parent = {"items": ["p1", "p2"]}
+        child = {"items": ["c1", "c2"]}
+        result = deep_merge(parent, child)
+        assert result == {"items": ["p1", "p2", "c1", "c2"]}
+
+    def test_nested_dict_with_list_concatenation(self) -> None:
+        """Real-world scenario: nested config.skills lists from two behaviors are merged."""
+        parent = {
+            "config": {
+                "skills": ["git+https://example.com/bundle-a@main#subdirectory=skills"]
+            }
+        }
+        child = {
+            "config": {
+                "skills": ["git+https://example.com/bundle-b@main#subdirectory=skills"]
+            }
+        }
+        result = deep_merge(parent, child)
+        assert result == {
+            "config": {
+                "skills": [
+                    "git+https://example.com/bundle-a@main#subdirectory=skills",
+                    "git+https://example.com/bundle-b@main#subdirectory=skills",
+                ]
+            }
+        }
+
+    def test_session_config_with_list_values(self) -> None:
+        """Verify concatenation behavior for session-level list config."""
+        parent = {"orchestrator": {"config": {"allowed_tools": ["tool-A"]}}}
+        child = {"orchestrator": {"config": {"allowed_tools": ["tool-B"]}}}
+        result = deep_merge(parent, child)
+        assert result["orchestrator"]["config"]["allowed_tools"] == ["tool-A", "tool-B"]
+
+    def test_list_dedup_insensitive_to_dict_key_order(self) -> None:
+        """Same dict content with different key order should deduplicate."""
+        parent = {"items": [{"module": "tool-bash", "source": "git+x"}]}
+        child = {"items": [{"source": "git+x", "module": "tool-bash"}]}
+        result = deep_merge(parent, child)
+        assert len(result["items"]) == 1
+
+    def test_no_cross_type_dedup_collision(self) -> None:
+        """String that looks like a dict repr should not collide with actual dict."""
+        parent = {"items": [{"a": 1}]}
+        child = {"items": ["{'a': 1}"]}
+        result = deep_merge(parent, child)
+        assert len(result["items"]) == 2  # both survive — different types
 
     def test_parent_unchanged(self) -> None:
         """Original parent dict is not mutated."""
@@ -208,3 +279,112 @@ class TestMergeModuleListsMultiInstance:
         assert len(result) == 1
         assert result[0]["id"] == "anthropic-prod"
         assert result[0]["config"] == {"x": 1, "y": 3, "z": 4}
+
+
+class TestMergeModuleListsListConfig:
+    """Integration tests: list-typed config values survive merge_module_lists."""
+
+    def test_skills_lists_are_concatenated(self) -> None:
+        """Real-world: two behaviors declare tool-skills with different config.skills lists.
+
+        Both skills URLs must survive. This was the live bug: composing superpowers
+        (config.skills: [url-a, url-b]) with parallax-discovery (config.skills: [url-c])
+        silently dropped url-a and url-b.
+        """
+        parent = [
+            {
+                "module": "tool-skills",
+                "source": "git+https://github.com/microsoft/amplifier-module-tool-skills@main",
+                "config": {
+                    "skills": [
+                        "git+https://github.com/obra/superpowers@main#subdirectory=skills",
+                        "git+https://github.com/microsoft/amplifier-bundle-superpowers@main#subdirectory=skills",
+                    ]
+                },
+            }
+        ]
+        child = [
+            {
+                "module": "tool-skills",
+                "source": "git+https://github.com/microsoft/amplifier-module-tool-skills@main",
+                "config": {
+                    "skills": [
+                        "git+https://github.com/bkrabach/amplifier-bundle-parallax-discovery@main#subdirectory=skills",
+                    ]
+                },
+            }
+        ]
+        result = merge_module_lists(parent, child)
+        assert len(result) == 1
+        assert result[0]["module"] == "tool-skills"
+        skills = result[0]["config"]["skills"]
+        assert len(skills) == 3
+        assert (
+            "git+https://github.com/obra/superpowers@main#subdirectory=skills" in skills
+        )
+        assert (
+            "git+https://github.com/microsoft/amplifier-bundle-superpowers@main#subdirectory=skills"
+            in skills
+        )
+        assert (
+            "git+https://github.com/bkrabach/amplifier-bundle-parallax-discovery@main#subdirectory=skills"
+            in skills
+        )
+
+    def test_search_paths_lists_are_concatenated(self) -> None:
+        """Real-world: hooks-mode config.search_paths from multiple bundles are all preserved.
+
+        This was the second live collision: superpowers + dev-machine both declare hooks-mode
+        with search_paths lists; only the last one survived before this fix.
+        """
+        parent = [
+            {
+                "module": "hooks-mode",
+                "config": {
+                    "search_paths": [
+                        "~/.amplifier/bundles/superpowers/modes",
+                        "~/.amplifier/bundles/shared/modes",
+                    ]
+                },
+            }
+        ]
+        child = [
+            {
+                "module": "hooks-mode",
+                "config": {
+                    "search_paths": [
+                        "~/.amplifier/bundles/dev-machine/modes",
+                    ]
+                },
+            }
+        ]
+        result = merge_module_lists(parent, child)
+        assert len(result) == 1
+        assert result[0]["module"] == "hooks-mode"
+        paths = result[0]["config"]["search_paths"]
+        assert len(paths) == 3
+        assert "~/.amplifier/bundles/superpowers/modes" in paths
+        assert "~/.amplifier/bundles/shared/modes" in paths
+        assert "~/.amplifier/bundles/dev-machine/modes" in paths
+
+    def test_duplicate_urls_deduplicated(self) -> None:
+        """If two behaviors declare the same skill URL, it appears only once."""
+        shared_url = "git+https://github.com/microsoft/amplifier-bundle-superpowers@main#subdirectory=skills"
+        parent = [{"module": "tool-skills", "config": {"skills": [shared_url]}}]
+        child = [{"module": "tool-skills", "config": {"skills": [shared_url]}}]
+        result = merge_module_lists(parent, child)
+        assert len(result) == 1
+        assert result[0]["config"]["skills"] == [shared_url]
+
+    def test_three_way_list_merge(self) -> None:
+        """A→B→C merges all lists: the primary real-world bug scenario."""
+        a = [{"module": "hooks-mode", "config": {"search_paths": ["@modes:modes"]}}]
+        b = [{"module": "hooks-mode", "config": {"search_paths": ["@superpowers:modes"]}}]
+        c = [{"module": "hooks-mode", "config": {"search_paths": ["@dev-machine:modes"]}}]
+        ab = merge_module_lists(a, b)
+        abc = merge_module_lists(ab, c)
+        paths = abc[0]["config"]["search_paths"]
+        assert len(paths) == 3
+        assert "@modes:modes" in paths
+        assert "@superpowers:modes" in paths
+        assert "@dev-machine:modes" in paths
