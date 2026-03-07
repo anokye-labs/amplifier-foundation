@@ -8,6 +8,5 @@ providers:
     source: git+https://github.com/microsoft/amplifier-module-provider-openai@main
     config:
       # Adjust to the exact model id available in your account
-      default_model: gpt-5.2
-      debug: true
-      raw_debug: true
+      default_model: gpt-5.4
+      raw: true
