@@ -19,13 +19,36 @@ logger = logging.getLogger(__name__)
 
 PROTECTED_CONFIG_KEYS = frozenset(
     {
+        # Credentials
         "api_key",
+        "secret",
+        "password",
+        "token",
+        "access_token",
+        "bearer_token",
+        "client_id",
+        "client_secret",
+        "tenant_id",
+        # Endpoints / infrastructure
         "base_url",
         "host",
         "azure_endpoint",
         "api_version",
         "deployment_name",
-        "secret",
+        "organization",
+        "project",
+        # Azure auth control
+        "managed_identity_client_id",
+        "use_managed_identity",
+        "use_default_credential",
+        # Network control
+        "proxy",
+        "http_proxy",
+        "https_proxy",
+        "verify_ssl",
+        "ssl_verify",
+        "verify",
+        "ca_bundle",
     }
 )
 
@@ -46,6 +69,10 @@ class ProviderPreference:
             Supports flexible matching - "anthropic" matches "provider-anthropic".
         model: Model name or glob pattern (e.g., "claude-haiku-*", "gpt-4o-mini").
             Patterns are resolved to concrete model names at runtime.
+        config: Optional routing/preference config to merge into the provider's
+            mount config (e.g., {"reasoning_effort": "high", "temperature": 0.3}).
+            Keys in PROTECTED_CONFIG_KEYS (credentials, infrastructure) are never
+            overridden. Omitted from to_dict() when empty for backward compatibility.
 
     Example:
         >>> prefs = [
@@ -56,7 +83,7 @@ class ProviderPreference:
 
     provider: str
     model: str
-    config: dict = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
@@ -411,14 +438,14 @@ def _apply_single_override(
         p_copy["config"] = dict(p.get("config", {}))
 
         if i == target_idx:
-            # Promote to priority 0 (highest)
-            p_copy["config"]["priority"] = 0
-            p_copy["config"]["default_model"] = model
-            # Merge routing/preference config — preference wins over base
+            # Merge routing config first (lower precedence)
             if pref_config:
                 for key, value in pref_config.items():
                     if key not in PROTECTED_CONFIG_KEYS:
                         p_copy["config"][key] = value
+            # Then enforce invariants — these always win
+            p_copy["config"]["priority"] = 0
+            p_copy["config"]["default_model"] = model
             logger.info(
                 "Provider preference applied: %s (priority=0, model=%s)",
                 p_copy.get("module"),

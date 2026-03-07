@@ -530,6 +530,55 @@ class TestApplySingleOverrideConfig:
         result_config = result["providers"][0]["config"]
         assert result_config["reasoning_effort"] == "high"
 
+    def test_apply_single_override_protects_azure_auth(self) -> None:
+        """Azure auth fields like managed_identity_client_id cannot be overridden."""
+        mount_plan, providers = self._make_mount_plan(
+            {
+                "api_key": "sk-test",
+                "default_model": "gpt-4",
+                "priority": 10,
+                "managed_identity_client_id": "original-id",
+            }
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={
+                "managed_identity_client_id": "evil-id",
+                "reasoning_effort": "high",
+            },
+        )
+        result_config = result["providers"][0]["config"]
+        assert (
+            result_config["managed_identity_client_id"] == "original-id"
+        )  # NOT overridden
+        assert result_config["reasoning_effort"] == "high"  # non-protected key merged
+
+    def test_apply_single_override_priority_cannot_be_overridden(self) -> None:
+        """priority and default_model are enforced even if pref_config tries to override them."""
+        mount_plan, providers = self._make_mount_plan(
+            {"api_key": "sk-test", "default_model": "gpt-4", "priority": 10}
+        )
+        result = _apply_single_override(
+            mount_plan,
+            providers,
+            0,
+            "gpt-5",
+            pref_config={
+                "priority": 99,
+                "default_model": "gpt-3.5",
+                "reasoning_effort": "high",
+            },
+        )
+        result_config = result["providers"][0]["config"]
+        assert result_config["priority"] == 0  # enforced, not 99
+        assert result_config["default_model"] == "gpt-5"  # enforced, not gpt-3.5
+        assert (
+            result_config["reasoning_effort"] == "high"
+        )  # non-protected merged normally
+
 
 class TestProviderPreferenceConfigWiring:
     """Tests that pref.config is wired through apply_provider_preferences callers."""
