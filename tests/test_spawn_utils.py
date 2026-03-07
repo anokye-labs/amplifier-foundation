@@ -359,6 +359,64 @@ class TestApplyProviderPreferencesWithResolution:
         assert result["providers"][0]["config"]["default_model"] == "gpt-4o-mini"
 
 
+class TestProviderPreferenceConfig:
+    """Tests for ProviderPreference config field."""
+
+    def test_provider_preference_config_default_empty(self) -> None:
+        """Config defaults to empty dict when not specified."""
+        pref = ProviderPreference(provider="openai", model="gpt-5")
+        assert pref.config == {}
+
+    def test_provider_preference_with_config(self) -> None:
+        """Config field holds provided values."""
+        pref = ProviderPreference(
+            provider="openai", model="gpt-5", config={"reasoning_effort": "high"}
+        )
+        assert pref.config == {"reasoning_effort": "high"}
+
+    def test_from_dict_with_config(self) -> None:
+        """from_dict populates config from dict key."""
+        pref = ProviderPreference.from_dict(
+            {
+                "provider": "openai",
+                "model": "gpt-5",
+                "config": {"reasoning_effort": "high"},
+            }
+        )
+        assert pref.config == {"reasoning_effort": "high"}
+
+    def test_from_dict_without_config_key(self) -> None:
+        """from_dict defaults config to empty dict when key absent (backward compat)."""
+        pref = ProviderPreference.from_dict({"provider": "openai", "model": "gpt-5"})
+        assert pref.config == {}
+
+    def test_to_dict_includes_config_when_present(self) -> None:
+        """to_dict includes config key when config is non-empty."""
+        pref = ProviderPreference(
+            provider="openai", model="gpt-5", config={"reasoning_effort": "high"}
+        )
+        assert pref.to_dict() == {
+            "provider": "openai",
+            "model": "gpt-5",
+            "config": {"reasoning_effort": "high"},
+        }
+
+    def test_to_dict_excludes_config_when_empty(self) -> None:
+        """to_dict omits config key when config is empty (backward compat)."""
+        pref = ProviderPreference(provider="openai", model="gpt-5")
+        assert pref.to_dict() == {"provider": "openai", "model": "gpt-5"}
+
+    def test_roundtrip_with_config(self) -> None:
+        """Roundtrip through to_dict/from_dict preserves all fields including config."""
+        original = ProviderPreference(
+            provider="openai", model="gpt-5", config={"reasoning_effort": "high"}
+        )
+        roundtripped = ProviderPreference.from_dict(original.to_dict())
+        assert roundtripped.provider == original.provider
+        assert roundtripped.model == original.model
+        assert roundtripped.config == original.config
+
+
 class TestBuildProviderLookupMultiInstance:
     """Tests for _build_provider_lookup with id-based lookup."""
 

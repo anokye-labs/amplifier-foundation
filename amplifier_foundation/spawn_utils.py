@@ -12,6 +12,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -43,17 +44,21 @@ class ProviderPreference:
 
     provider: str
     model: str
+    config: dict = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
-        return {"provider": self.provider, "model": self.model}
+        result: dict[str, Any] = {"provider": self.provider, "model": self.model}
+        if self.config:
+            result["config"] = self.config
+        return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, str]) -> ProviderPreference:
+    def from_dict(cls, data: dict[str, Any]) -> ProviderPreference:
         """Create from dictionary representation.
 
         Args:
-            data: Dictionary with 'provider' and 'model' keys.
+            data: Dictionary with 'provider' and 'model' keys, and optional 'config'.
 
         Returns:
             ProviderPreference instance.
@@ -65,7 +70,11 @@ class ProviderPreference:
             raise ValueError("ProviderPreference requires 'provider' key")
         if "model" not in data:
             raise ValueError("ProviderPreference requires 'model' key")
-        return cls(provider=data["provider"], model=data["model"])
+        return cls(
+            provider=data["provider"],
+            model=data["model"],
+            config=data.get("config", {}),
+        )
 
 
 @dataclass
