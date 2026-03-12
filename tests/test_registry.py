@@ -1072,3 +1072,57 @@ class TestRootURIPreservedOnNameCollision:
             # Behavior should be registered under its own name with subdirectory URI
             behavior_state = registry.get_state("my-behavior")
             assert behavior_state is not None
+
+
+class TestIncludeSourceResolver:
+    """Tests for include_source_resolver callback support."""
+
+    def test_default_no_include_source_resolver(self) -> None:
+        """By default, _include_source_resolver is None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(home=Path(tmpdir) / "home")
+            assert registry._include_source_resolver is None
+
+    def test_init_with_include_source_resolver(self) -> None:
+        """Constructor stores include_source_resolver callback."""
+
+        def my_resolver(source: str) -> str | None:
+            return f"resolved://{source}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(
+                home=Path(tmpdir) / "home",
+                include_source_resolver=my_resolver,
+            )
+            assert registry._include_source_resolver is my_resolver
+
+    def test_set_include_source_resolver_stores_callback(self) -> None:
+        """set_include_source_resolver stores callback that is invoked during include resolution."""
+        resolved_calls: list[str] = []
+
+        def my_resolver(source: str) -> str | None:
+            resolved_calls.append(source)
+            return f"resolved://{source}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(home=Path(tmpdir) / "home")
+            registry.set_include_source_resolver(my_resolver)
+
+            # When resolver is set, _resolve_include_source should invoke it
+            # NOTE: This test will FAIL until Task 2 wires up the hook
+            registry._resolve_include_source("some-namespace:some/path")
+            assert "some-namespace:some/path" in resolved_calls
+
+    def test_set_include_source_resolver_clears_with_none(self) -> None:
+        """set_include_source_resolver(None) clears the resolver."""
+
+        def my_resolver(source: str) -> str | None:
+            return f"resolved://{source}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(home=Path(tmpdir) / "home")
+            registry.set_include_source_resolver(my_resolver)
+            assert registry._include_source_resolver is my_resolver
+
+            registry.set_include_source_resolver(None)
+            assert registry._include_source_resolver is None

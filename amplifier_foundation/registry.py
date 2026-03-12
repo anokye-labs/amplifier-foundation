@@ -24,7 +24,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from amplifier_foundation.bundle import Bundle
 from amplifier_foundation.exceptions import (
@@ -165,7 +165,13 @@ class BundleRegistry:
         bundle = await registry.load("foundation")
     """
 
-    def __init__(self, home: Path | None = None, *, strict: bool = False) -> None:
+    def __init__(
+        self,
+        home: Path | None = None,
+        *,
+        strict: bool = False,
+        include_source_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
         """Initialize registry.
 
         Args:
@@ -175,9 +181,14 @@ class BundleRegistry:
                   3. ~/.amplifier (default)
             strict: If True, include failures raise exceptions instead of
                     logging warnings. Useful for CI and validation workflows.
+            include_source_resolver: Optional callback for resolving include
+                    source URIs. When provided, called before default resolution
+                    logic. Returns a resolved URI string or None to fall back to
+                    default behavior.
         """
         self._home = self._resolve_home(home)
         self._strict = strict
+        self._include_source_resolver = include_source_resolver
         self._registry: dict[str, BundleState] = {}
         self._source_resolver = SimpleSourceResolver(
             cache_dir=self._home / "cache",
@@ -193,6 +204,18 @@ class BundleRegistry:
     def home(self) -> Path:
         """Base directory for all registry data."""
         return self._home
+
+    def set_include_source_resolver(
+        self, resolver: Callable[[str], str | None] | None
+    ) -> None:
+        """Set or clear the include source resolver callback.
+
+        Args:
+            resolver: Callable that takes a source URI string and returns a
+                      resolved URI string or None to fall back to default
+                      behavior. Pass None to clear any previously set resolver.
+        """
+        self._include_source_resolver = resolver
 
     def _resolve_home(self, home: Path | None) -> Path:
         """Resolve home directory from args or use default."""
