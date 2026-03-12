@@ -1126,3 +1126,63 @@ class TestIncludeSourceResolver:
 
             registry.set_include_source_resolver(None)
             assert registry._include_source_resolver is None
+
+    def test_resolver_returning_override_is_used(self) -> None:
+        """Resolver returning a string overrides normal resolution (e.g., for superpowers URIs)."""
+
+        def my_resolver(source: str) -> str | None:
+            if "superpowers" in source:
+                return "git+https://github.com/override/superpowers#subdirectory=agents/my-agent"
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(
+                home=Path(tmpdir) / "home",
+                include_source_resolver=my_resolver,
+            )
+            result = registry._resolve_include_source("superpowers:agents/my-agent")
+            assert (
+                result
+                == "git+https://github.com/override/superpowers#subdirectory=agents/my-agent"
+            )
+
+    def test_resolver_returning_none_falls_through(self) -> None:
+        """Resolver returning None allows normal resolution to proceed."""
+
+        def my_resolver(source: str) -> str | None:
+            return None  # Always defer to normal resolution
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(
+                home=Path(tmpdir) / "home",
+                include_source_resolver=my_resolver,
+            )
+            # A URI source should still be returned as-is when resolver returns None
+            result = registry._resolve_include_source(
+                "git+https://github.com/some/repo"
+            )
+            assert result == "git+https://github.com/some/repo"
+
+    def test_plain_name_unaffected_without_resolver(self) -> None:
+        """Plain names pass through unchanged when no resolver is set."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(home=Path(tmpdir) / "home")
+            result = registry._resolve_include_source("plain-bundle-name")
+            assert result == "plain-bundle-name"
+
+    def test_resolver_called_for_plain_names_too(self) -> None:
+        """Resolver is called for ALL source types, including plain names."""
+        resolver_calls: list[str] = []
+
+        def my_resolver(source: str) -> str | None:
+            resolver_calls.append(source)
+            return f"overridden://{source}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = BundleRegistry(
+                home=Path(tmpdir) / "home",
+                include_source_resolver=my_resolver,
+            )
+            result = registry._resolve_include_source("plain-bundle-name")
+            assert "plain-bundle-name" in resolver_calls
+            assert result == "overridden://plain-bundle-name"

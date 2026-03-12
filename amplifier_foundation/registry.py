@@ -853,6 +853,13 @@ class BundleRegistry:
         Returns:
             URI string, or None if namespace:path cannot be resolved.
         """
+        # 0. Check include source resolver callback - allows caller to override any source
+        if self._include_source_resolver:
+            override = self._include_source_resolver(source)
+            if override is not None:
+                logger.debug(f"Include source overridden: {source} -> {override}")
+                return override
+
         # 1. Check if it's already a URI - return as-is
         if "://" in source or source.startswith("git+"):
             return source
