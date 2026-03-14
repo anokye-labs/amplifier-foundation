@@ -1,9 +1,17 @@
 # validate-bundle-repo.yaml
-# Repository-Wide Bundle Validator Recipe v3.2.0
+# Repository-Wide Bundle Validator Recipe v3.3.0
 # Validates an entire bundle repository against structural requirements, conventions,
 # and Amplifier bundle philosophy (context sink pattern, thin behaviors, tool placement)
 #
 # CHANGELOG:
+# v3.3.0 - Opt-in recipe validation integration
+#        - New context vars: validate_recipes, validate_all, recipes_dir, known_agents
+#        - Phase 0.1: validate-all-flags step expands validate_all convenience flag
+#        - Phase 2.6.0: validate-recipes sub-recipe step (opt-in, on_error: continue)
+#        - set-default-recipe-validation provides no-op default when skipped
+#        - quality-classification incorporates recipe quality_level into scoring
+#        - synthesize-report includes Recipe Validation section
+#
 # v3.2.0 - Graceful environment handling
 #        - Phase 0 now checks prerequisites without auto-install attempts
 #        - Detects hatchling, amplifier_foundation, pip wheel capability
@@ -116,13 +124,17 @@ description: |
   - All measurements use TOKENS (len/4), never line counts
   
   For single bundle validation, use validate-bundle.yaml instead.
-version: "3.2.0"
+version: "3.3.0"
 author: "Amplifier Foundation Team"
 tags: ["bundle", "validation", "quality", "conventions", "repository", "packaging", "hygiene", "context-sink"]
 
 context:
   repo_path: ""  # Required: Path to bundle repository root
   validate_agents: "false"  # Optional: Also run agent validation (true/false)
+  validate_recipes: "false"  # Optional: Also run recipe validation (true/false)
+  validate_all: "false"  # Optional: Convenience flag — enables both agent and recipe validation
+  recipes_dir: "recipes"  # Optional: Subdirectory containing recipes (default: 'recipes')
+  known_agents: ""  # Optional: JSON list of known external namespace:agent patterns for recipe validation
 
 steps:
   # ============================================================================
@@ -266,6 +278,39 @@ steps:
     output: "env_check"
     parse_json: true
     timeout: 30
+
+  # ============================================================================
+  # PHASE 0.1: Validate-All Flags Expansion
+  # Expands validate_all='true' to enable both agent and recipe validation
+  # ============================================================================
+
+  - id: "validate-all-flags"
+    type: "bash"
+    command: |
+      python3 << 'EOF'
+      import json
+
+      validate_all = "{{validate_all}}"
+      validate_agents = "{{validate_agents}}"
+      validate_recipes = "{{validate_recipes}}"
+
+      # If validate_all is 'true', enable both agent and recipe validation
+      if validate_all == "true":
+          validate_agents = "true"
+          validate_recipes = "true"
+
+      result = {
+          "validate_agents": validate_agents,
+          "validate_recipes": validate_recipes,
+          "validate_all": validate_all
+      }
+
+      print(json.dumps(result))
+      EOF
+    output: "validation_flags"
+    parse_json: true
+    timeout: 10
+    depends_on: ["environment-check"]
 
   # ============================================================================
   # PHASE 0.5: Packaging Consistency Check
@@ -1948,6 +1993,45 @@ steps:
     depends_on: ["validate-all-bundles"]
 
   # ============================================================================
+  # PHASE 2.6.0: Recipe Validation (Opt-In via validate_recipes or validate_all)
+  # Runs validate-recipes.yaml as a sub-recipe when requested
+  # ============================================================================
+
+  - id: "validate-recipes"
+    type: "recipe"
+    recipe: "recipes:recipes/validate-recipes.yaml"
+    condition: "{{validation_flags.validate_recipes}} == 'true'"
+    context:
+      repo_path: "{{repo_path}}"
+      recipes_dir: "{{recipes_dir}}"
+      known_agents: "{{known_agents}}"
+    output: "recipe_validation"
+    timeout: 600
+    on_error: "continue"
+    depends_on: ["repo-discovery", "validate-all-flags"]
+
+  - id: "set-default-recipe-validation"
+    type: "bash"
+    condition: "{{validation_flags.validate_recipes}} != 'true'"
+    command: |
+      python3 << 'EOF'
+      import json
+
+      result = {
+          "quality_level": "good",
+          "summary": "Recipe validation not performed",
+          "recipes_validated": 0,
+          "skipped": True
+      }
+
+      print(json.dumps(result))
+      EOF
+    output: "recipe_validation"
+    parse_json: true
+    timeout: 10
+    depends_on: ["validate-all-flags"]
+
+  # ============================================================================
   # PHASE 2.6: Quality Classification (Deterministic)
   # Enhanced in v3.0.0 to incorporate all new validation phases
   # ============================================================================
@@ -2007,6 +2091,12 @@ steps:
           tool_placement = json.loads(tool_placement_raw)
       except (json.JSONDecodeError, ValueError):
           tool_placement = {"passed": True, "skipped": True}
+
+      recipe_validation_raw = '''{{recipe_validation}}'''
+      try:
+          recipe_validation = json.loads(recipe_validation_raw)
+      except (json.JSONDecodeError, ValueError):
+          recipe_validation = {"quality_level": "good", "skipped": True, "summary": "Recipe validation not performed"}
 
       # Handle case where individual validation was skipped
       if individual.get("skipped", False):
@@ -2266,14 +2356,23 @@ steps:
           critical_count += len([i for i in results["hygiene_issues"] if i.get("severity") == "ERROR"])
           critical_count += len([i for i in results["completeness_issues"] if i.get("severity") == "ERROR"])
           critical_count += len([i for i in results["experiment_issues"] if i.get("severity") == "ERROR"])
+
+          # Recipe validation impact
+          recipe_quality = recipe_validation.get("quality_level", "good")
+          if recipe_quality == "critical":
+              critical_count += 1
           
           needs_work_count = results["summary"]["needs_work"]
           needs_work_count += len([i for i in results["structural_issues"] if i.get("severity") == "needs_work"])
+          if recipe_quality == "needs_work":
+              needs_work_count += 1
           
           warning_count = results["summary"]["polish"]
           warning_count += len([i for i in results["hygiene_issues"] if i.get("severity") == "WARNING"])
           warning_count += len([i for i in results["context_sink_issues"] if i.get("severity") == "WARNING"])
           warning_count += len([i for i in results["experiment_issues"] if i.get("severity") == "WARNING"])
+          if recipe_quality == "polish":
+              warning_count += 1
           
           if critical_count > 0:
               results["quality_level"] = "critical"
@@ -2314,6 +2413,14 @@ steps:
               "context_sink_warnings": len([i for i in results["context_sink_issues"] if i.get("severity") == "WARNING"]),
               "tool_placement_suggestions": len(results["tool_placement_issues"])
           }
+
+          # v3.3.0: Recipe validation summary
+          results["recipe_validation_summary"] = {
+              "performed": not recipe_validation.get("skipped", False),
+              "quality_level": recipe_validation.get("quality_level", "good"),
+              "summary": recipe_validation.get("summary", "Recipe validation not performed"),
+              "recipes_validated": recipe_validation.get("recipes_validated", 0)
+          }
           
           # v3.2.0: Add environment limitations summary
           results["environment_summary"] = {
@@ -2330,7 +2437,7 @@ steps:
     output: "quality_classification"
     parse_json: true
     timeout: 60
-    depends_on: ["validate-all-bundles", "behavior-hygiene-validation", "standalone-completeness-validation", "experiments-validation", "context-sink-compliance", "tool-placement-analysis"]
+    depends_on: ["validate-all-bundles", "behavior-hygiene-validation", "standalone-completeness-validation", "experiments-validation", "context-sink-compliance", "tool-placement-analysis", "validate-recipes", "set-default-recipe-validation"]
 
   # ============================================================================
   # PHASE 2.75: Initialize Optional Outputs
@@ -2671,6 +2778,11 @@ steps:
       {{tool_placement_results}}
       ```
 
+      **Recipe Validation (v3.3.0):**
+      ```json
+      {{recipe_validation}}
+      ```
+
       **Quick Approval Summary:**
       {{approval_summary}}
 
@@ -2814,4 +2926,4 @@ steps:
         - Python packaging must build successfully (if present)
     output: "final_report"
     timeout: 300
-    depends_on: ["quality-classification", "quick-approval", "composition-analysis", "repo-conventions", "set-default-approval-summary", "set-default-composition-analysis", "set-default-repo-conventions"]
+    depends_on: ["quality-classification", "quick-approval", "composition-analysis", "repo-conventions", "set-default-approval-summary", "set-default-composition-analysis", "set-default-repo-conventions", "set-default-recipe-validation"]
