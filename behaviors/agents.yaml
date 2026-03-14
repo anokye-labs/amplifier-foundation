@@ -32,6 +32,13 @@ tools:
         exclude_tools: [tool-delegate]  # Spawned agents can't further delegate by default
         exclude_hooks: []
 
+  # Register foundation's own skills directory for discovery
+  - module: tool-skills
+    source: git+https://github.com/microsoft/amplifier-module-tool-skills@main
+    config:
+      skills:
+        - "git+https://github.com/microsoft/amplifier-foundation@main#subdirectory=skills"
+
 context:
   include:
     - foundation:context/agents/delegation-instructions.md
