@@ -2012,6 +2012,7 @@ steps:
 
   - id: "set-default-recipe-validation"
     type: "bash"
+    condition: "{{validation_flags.validate_recipes}} != 'true'"
     command: |
       python3 << 'EOF'
       import json
