@@ -7,8 +7,11 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import shutil
+import stat
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +21,28 @@ from amplifier_foundation.paths.resolution import ResolvedSource
 from amplifier_foundation.sources.protocol import SourceStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _rmtree_safe(path: Path) -> None:
+    """Remove a directory tree, handling read-only files on Windows.
+
+    Git pack files (.idx, .pack) are created read-only on Windows, causing
+    shutil.rmtree() to fail with [WinError 5] Access is denied.
+    """
+    if sys.platform != "win32":
+        shutil.rmtree(path)
+        return
+
+    def _handle_readonly(func: object, fpath: str, exc: BaseException) -> None:
+        os.chmod(fpath, stat.S_IWRITE)
+        if callable(func):
+            func(fpath)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_handle_readonly)
+    else:
+        shutil.rmtree(path, onerror=_handle_readonly)  # type: ignore[call-arg]
+
 
 # Metadata file name for tracking cache info
 CACHE_METADATA_FILE = ".amplifier_cache_meta.json"
@@ -85,7 +110,11 @@ class GitSourceHandler:
             if result.stdout.strip():
                 return result.stdout.split()[0]
             return None
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ):
             return None
 
     def _get_cache_metadata(self, cache_path: Path) -> dict:
@@ -133,10 +162,14 @@ class GitSourceHandler:
             or (cache_path / "setup.py").exists()
             or (cache_path / "setup.cfg").exists()
         )
-        has_bundle = (cache_path / "bundle.md").exists() or (cache_path / "bundle.yaml").exists()
+        has_bundle = (cache_path / "bundle.md").exists() or (
+            cache_path / "bundle.yaml"
+        ).exists()
 
         if not has_python_module and not has_bundle:
-            logger.warning(f"Clone missing expected files (pyproject.toml/setup.py/bundle.md): {cache_path}")
+            logger.warning(
+                f"Clone missing expected files (pyproject.toml/setup.py/bundle.md): {cache_path}"
+            )
             return False
 
         return True
@@ -163,20 +196,23 @@ class GitSourceHandler:
             # Verify cache integrity before using
             if not self._verify_clone_integrity(cache_path):
                 logger.warning(f"Cached clone is invalid, removing: {cache_path}")
-                shutil.rmtree(cache_path, ignore_errors=True)
+                with contextlib.suppress(Exception):
+                    _rmtree_safe(cache_path)
             else:
                 result_path = cache_path
                 if parsed.subpath:
                     result_path = cache_path / parsed.subpath
                 if result_path.exists():
-                    return ResolvedSource(active_path=result_path, source_root=cache_path)
+                    return ResolvedSource(
+                        active_path=result_path, source_root=cache_path
+                    )
 
         # Clone repository
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Remove partial clone if exists
         if cache_path.exists():
-            shutil.rmtree(cache_path)
+            _rmtree_safe(cache_path)
 
         try:
             # Shallow clone with specific ref
@@ -197,7 +233,8 @@ class GitSourceHandler:
             # Verify clone completed with expected structure
             if not self._verify_clone_integrity(cache_path):
                 # Clone succeeded but result is invalid - remove and raise error
-                shutil.rmtree(cache_path, ignore_errors=True)
+                with contextlib.suppress(Exception):
+                    _rmtree_safe(cache_path)
                 raise BundleNotFoundError(
                     f"Clone of {git_url}@{ref} completed but result is invalid "
                     "(missing pyproject.toml/setup.py/bundle.md). "
@@ -216,7 +253,9 @@ class GitSourceHandler:
                 },
             )
         except subprocess.CalledProcessError as e:
-            raise BundleNotFoundError(f"Failed to clone {git_url}@{ref}: {e.stderr}") from e
+            raise BundleNotFoundError(
+                f"Failed to clone {git_url}@{ref}: {e.stderr}"
+            ) from e
 
         # Return path with subpath if specified
         result_path = cache_path
@@ -224,7 +263,9 @@ class GitSourceHandler:
             result_path = cache_path / parsed.subpath
 
         if not result_path.exists():
-            raise BundleNotFoundError(f"Subpath not found after clone: {parsed.subpath}")
+            raise BundleNotFoundError(
+                f"Subpath not found after clone: {parsed.subpath}"
+            )
 
         return ResolvedSource(active_path=result_path, source_root=cache_path)
 
@@ -264,7 +305,9 @@ class GitSourceHandler:
             if metadata.get("cached_at"):
                 with contextlib.suppress(ValueError):
                     status.cached_at = datetime.fromisoformat(metadata["cached_at"])
-            status.cached_commit = metadata.get("commit") or self._get_local_commit(cache_path)
+            status.cached_commit = metadata.get("commit") or self._get_local_commit(
+                cache_path
+            )
         else:
             status.cached_commit = None
 
@@ -287,11 +330,15 @@ class GitSourceHandler:
                 status.summary = f"Not cached (remote: {status.remote_commit[:8]})"
             elif status.cached_commit == status.remote_commit:
                 status.has_update = False
-                cached_short = status.cached_commit[:8] if status.cached_commit else "unknown"
+                cached_short = (
+                    status.cached_commit[:8] if status.cached_commit else "unknown"
+                )
                 status.summary = f"Up to date ({cached_short})"
             else:
                 status.has_update = True
-                cached_short = status.cached_commit[:8] if status.cached_commit else "unknown"
+                cached_short = (
+                    status.cached_commit[:8] if status.cached_commit else "unknown"
+                )
                 remote_short = status.remote_commit[:8]
                 status.summary = f"Update available ({cached_short} → {remote_short})"
         except Exception as e:
@@ -320,7 +367,7 @@ class GitSourceHandler:
 
         # Remove existing cache
         if cache_path.exists():
-            shutil.rmtree(cache_path)
+            _rmtree_safe(cache_path)
 
         # Re-resolve (will clone fresh)
         return await self.resolve(parsed, cache_dir)
